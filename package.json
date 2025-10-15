@@ -1,0 +1,22 @@
+{
+  "name": "writersroom",
+  "version": "0.1.0",
+  "description": "Obsidian plugin to call ChatGPT prompts by prompt ID and highlight edits.",
+  "main": "main.js",
+  "scripts": {
+    "dev": "esbuild --bundle main.ts --outfile=main.js --external:obsidian --format=cjs --platform=node --target=es2020 --watch",
+    "build": "esbuild --bundle main.ts --outfile=main.js --external:obsidian --format=cjs --platform=node --target=es2020"
+  },
+  "keywords": [
+    "obsidian-plugin",
+    "chatgpt"
+  ],
+  "author": "Austen",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "esbuild": "^0.21.5",
+    "obsidian": "^1.5.8",
+    "typescript": "^5.4.0"
+  }
+}
