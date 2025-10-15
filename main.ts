@@ -4,8 +4,15 @@ import {
   Plugin,
   PluginSettingTab,
   Setting,
-  TextComponent
+  TextComponent,
+  TAbstractFile,
+  TFile,
+  Vault
 } from "obsidian";
+import { readFile } from "fs/promises";
+import { join } from "path";
+
+import { parseEditPayloadFromString } from "./editParser";
 
 interface WritersRoomSettings {
   apiKey: string;
@@ -30,6 +37,81 @@ export default class WritersRoomPlugin extends Plugin {
         new Notice("Writers Room plugin initialized.");
       }
     });
+  }
+
+  private getVault(): Vault {
+    return (this.app as App & { vault: Vault }).vault;
+  }
+
+  private async ensureFolder(folderPath: string): Promise<void> {
+    const vault = this.getVault();
+    const adapter = vault.adapter;
+    const exists = await adapter.exists(folderPath);
+    if (!exists) {
+      try {
+        await vault.createFolder(folderPath);
+      } catch (error) {
+        const alreadyExists =
+          error instanceof Error && /exists/i.test(error.message);
+        if (!alreadyExists) {
+          throw error;
+        }
+      }
+    }
+  }
+
+  private isTFile(file: TAbstractFile | null): file is TFile {
+    return file instanceof TFile;
+  }
+
+  private async writeFile(vaultPath: string, contents: string): Promise<void> {
+    const vault = this.getVault();
+    const existing = vault.getAbstractFileByPath(vaultPath);
+
+    if (this.isTFile(existing)) {
+      await vault.modify(existing, contents);
+      return;
+    }
+
+    if (existing) {
+      throw new Error(`${vaultPath} exists and is not a file.`);
+    }
+
+    await vault.create(vaultPath, contents);
+  }
+
+  async loadTestFixtures() {
+    const testsDir = join(__dirname, "tests");
+    const storyPath = join(testsDir, "three-little-pigs.md");
+    const editsPath = join(testsDir, "three-little-pigs-edits.json");
+
+    try {
+      const [storyContent, editsRaw] = await Promise.all([
+        readFile(storyPath, "utf8"),
+        readFile(editsPath, "utf8")
+      ]);
+
+      const parsedEdits = parseEditPayloadFromString(editsRaw);
+
+      const storyVaultPath = "WritersRoom Tests/Three Little Pigs.md";
+      const editsVaultPath = "edits/three-little-pigs-edits.json";
+
+      await this.ensureFolder("WritersRoom Tests");
+      await this.ensureFolder("edits");
+
+      await this.writeFile(storyVaultPath, storyContent.trimEnd() + "\n");
+      await this.writeFile(
+        editsVaultPath,
+        JSON.stringify(parsedEdits, null, 2) + "\n"
+      );
+
+      new Notice("Writers Room test fixtures loaded.");
+    } catch (error) {
+      console.error(error);
+      const message =
+        error instanceof Error ? error.message : "Unknown error occurred.";
+      new Notice(`Failed to load fixtures: ${message}`);
+    }
   }
 
   async loadSettings() {
@@ -68,6 +150,17 @@ class WritersRoomSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         text.inputEl.type = "password";
+      });
+
+    new Setting(containerEl)
+      .setName("Load demo data")
+      .setDesc("Create sample story and edits in your vault for testing.")
+      .addButton((button) => {
+        button.setButtonText("Load test");
+        button.setCta();
+        button.onClick(async () => {
+          await this.plugin.loadTestFixtures();
+        });
       });
   }
 }
