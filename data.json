@@ -1,3 +1,169 @@
 {
-  "apiKey": ""
+  "settings": {
+    "apiKey": ""
+  },
+  "edits": {
+    "cold boot.md": {
+      "payload": {
+        "summary": "In a dystopian future where virtual reality and corporate control dominate, Jamie, a disillusioned office worker, navigates her monotonous life until she is introduced to a private server by her coworker Anabelle. This server, known as the Zoo, offers a space for self-exploration and transformation, allowing users to embrace their identities in a supportive community. As Jamie interacts with various avatars and experiences a sense of freedom, she confronts her fears and insecurities, ultimately finding acceptance and connection. The story culminates in Jamie's realization of her desire to be different and her newfound sense of belonging.",
+        "edits": [
+          {
+            "agent": "editor",
+            "line": 1,
+            "type": "annotation",
+            "category": "flow",
+            "original_text": "My job is in hell.",
+            "output": null
+          },
+          {
+            "agent": "editor",
+            "line": 9,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "But every workday morning, I'd plug myself into the computer and transport my consciousness to a different reality entirely.",
+            "output": "But every workday morning, I'd plug myself into the computer and transport my consciousness to a different reality entirely, one where the weight of existence felt lighter."
+          },
+          {
+            "agent": "editor",
+            "line": 18,
+            "type": "subtraction",
+            "category": "rhythm",
+            "original_text": "overwhelm and, well, _despair._",
+            "output": "overwhelm and _despair._"
+          },
+          {
+            "agent": "editor",
+            "line": 35,
+            "type": "addition",
+            "category": "punch",
+            "original_text": "“Let’s take an early lunch,” Anabelle said. “I’m about to change your life.”",
+            "output": "“Let’s take an early lunch,” Anabelle said, her eyes sparkling with mischief. “I’m about to change your life.”"
+          },
+          {
+            "agent": "editor",
+            "line": 60,
+            "type": "subtraction",
+            "category": "flow",
+            "original_text": "I pulled a jack from the rig and, searching with my fingers, plugged it into a port behind my ear.",
+            "output": "I pulled a jack from the rig and plugged it into a port behind my ear."
+          },
+          {
+            "agent": "editor",
+            "line": 81,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "The door creaked open on its own.",
+            "output": "The door creaked open on its own, revealing a warmth that beckoned me inside."
+          },
+          {
+            "agent": "editor",
+            "line": 114,
+            "type": "annotation",
+            "category": "flow",
+            "original_text": "I blinked. “This isn’t one of those NSFW LARPs, is it? I swear to god if I walk in and someone’s yiffing a dragon—”",
+            "output": null
+          },
+          {
+            "agent": "editor",
+            "line": 134,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "I took off my bra and slung it over Stinky's eye.",
+            "output": "I took off my bra and slung it over Stinky's eye, feeling a rush of defiance."
+          },
+          {
+            "agent": "editor",
+            "line": 152,
+            "type": "subtraction",
+            "category": "rhythm",
+            "original_text": "I could hear laughter, music, talking, and not a _single advertisement to be found._",
+            "output": "I could hear laughter, music, and talking, and not a _single advertisement_ to be found."
+          },
+          {
+            "agent": "editor",
+            "line": 177,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "I stepped in.",
+            "output": "I stepped in, the atmosphere wrapping around me like a warm embrace."
+          },
+          {
+            "agent": "editor",
+            "line": 203,
+            "type": "subtraction",
+            "category": "flow",
+            "original_text": "I opened my mouth. Closed it again.",
+            "output": "I opened my mouth and closed it again."
+          },
+          {
+            "agent": "editor",
+            "line": 221,
+            "type": "addition",
+            "category": "punch",
+            "original_text": "I didn’t know them yet. But I would.",
+            "output": "I didn’t know them yet, but I felt it in my bones: I would."
+          },
+          {
+            "agent": "editor",
+            "line": 238,
+            "type": "subtraction",
+            "category": "rhythm",
+            "original_text": "I kept tapping at my wrist.",
+            "output": "I tapped at my wrist."
+          },
+          {
+            "agent": "editor",
+            "line": 265,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "I felt a smile crawl onto my face.",
+            "output": "I felt a smile crawl onto my face, warmth spreading through me."
+          },
+          {
+            "agent": "editor",
+            "line": 284,
+            "type": "subtraction",
+            "category": "flow",
+            "original_text": "I didn’t know how to explain it.",
+            "output": "I didn’t know how to explain."
+          },
+          {
+            "agent": "editor",
+            "line": 300,
+            "type": "addition",
+            "category": "punch",
+            "original_text": "“I hope you come back to seek them.”",
+            "output": "“I hope you come back to seek those answers.”"
+          },
+          {
+            "agent": "editor",
+            "line": 318,
+            "type": "subtraction",
+            "category": "flow",
+            "original_text": "I thought about logging into my work instance.",
+            "output": "I thought about logging into work."
+          },
+          {
+            "agent": "editor",
+            "line": 335,
+            "type": "addition",
+            "category": "sensory",
+            "original_text": "I felt ashamed; I felt proud.",
+            "output": "I felt ashamed, yet proud, a whirlwind of conflicting emotions."
+          },
+          {
+            "agent": "editor",
+            "line": 353,
+            "type": "subtraction",
+            "category": "rhythm",
+            "original_text": "I felt _whole._",
+            "output": "I felt _whole._"
+          }
+        ]
+      },
+      "editsPath": "edits/cold-boot-edits.json",
+      "updatedAt": 1760765213883,
+      "hash": "{\"summary\":\"In a dystopian future where virtual reality and corporate control dominate, Jamie, a disillusioned office worker, navigates her monotonous life until she is introduced to a private server by her coworker Anabelle. This server, known as the Zoo, offers a space for self-exploration and transformation, allowing users to embrace their identities in a supportive community. As Jamie interacts with various avatars and experiences a sense of freedom, she confronts her fears and insecurities, ultimately finding acceptance and connection. The story culminates in Jamie's realization of her desire to be different and her newfound sense of belonging.\",\"edits\":[{\"agent\":\"editor\",\"line\":1,\"type\":\"annotation\",\"category\":\"flow\",\"original_text\":\"My job is in hell.\",\"output\":null},{\"agent\":\"editor\",\"line\":9,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"But every workday morning, I'd plug myself into the computer and transport my consciousness to a different reality entirely.\",\"output\":\"But every workday morning, I'd plug myself into the computer and transport my consciousness to a different reality entirely, one where the weight of existence felt lighter.\"},{\"agent\":\"editor\",\"line\":18,\"type\":\"subtraction\",\"category\":\"rhythm\",\"original_text\":\"overwhelm and, well, _despair._\",\"output\":\"overwhelm and _despair._\"},{\"agent\":\"editor\",\"line\":35,\"type\":\"addition\",\"category\":\"punch\",\"original_text\":\"“Let’s take an early lunch,” Anabelle said. “I’m about to change your life.”\",\"output\":\"“Let’s take an early lunch,” Anabelle said, her eyes sparkling with mischief. “I’m about to change your life.”\"},{\"agent\":\"editor\",\"line\":60,\"type\":\"subtraction\",\"category\":\"flow\",\"original_text\":\"I pulled a jack from the rig and, searching with my fingers, plugged it into a port behind my ear.\",\"output\":\"I pulled a jack from the rig and plugged it into a port behind my ear.\"},{\"agent\":\"editor\",\"line\":81,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"The door creaked open on its own.\",\"output\":\"The door creaked open on its own, revealing a warmth that beckoned me inside.\"},{\"agent\":\"editor\",\"line\":114,\"type\":\"annotation\",\"category\":\"flow\",\"original_text\":\"I blinked. “This isn’t one of those NSFW LARPs, is it? I swear to god if I walk in and someone’s yiffing a dragon—”\",\"output\":null},{\"agent\":\"editor\",\"line\":134,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"I took off my bra and slung it over Stinky's eye.\",\"output\":\"I took off my bra and slung it over Stinky's eye, feeling a rush of defiance.\"},{\"agent\":\"editor\",\"line\":152,\"type\":\"subtraction\",\"category\":\"rhythm\",\"original_text\":\"I could hear laughter, music, talking, and not a _single advertisement to be found._\",\"output\":\"I could hear laughter, music, and talking, and not a _single advertisement_ to be found.\"},{\"agent\":\"editor\",\"line\":177,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"I stepped in.\",\"output\":\"I stepped in, the atmosphere wrapping around me like a warm embrace.\"},{\"agent\":\"editor\",\"line\":203,\"type\":\"subtraction\",\"category\":\"flow\",\"original_text\":\"I opened my mouth. Closed it again.\",\"output\":\"I opened my mouth and closed it again.\"},{\"agent\":\"editor\",\"line\":221,\"type\":\"addition\",\"category\":\"punch\",\"original_text\":\"I didn’t know them yet. But I would.\",\"output\":\"I didn’t know them yet, but I felt it in my bones: I would.\"},{\"agent\":\"editor\",\"line\":238,\"type\":\"subtraction\",\"category\":\"rhythm\",\"original_text\":\"I kept tapping at my wrist.\",\"output\":\"I tapped at my wrist.\"},{\"agent\":\"editor\",\"line\":265,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"I felt a smile crawl onto my face.\",\"output\":\"I felt a smile crawl onto my face, warmth spreading through me.\"},{\"agent\":\"editor\",\"line\":284,\"type\":\"subtraction\",\"category\":\"flow\",\"original_text\":\"I didn’t know how to explain it.\",\"output\":\"I didn’t know how to explain.\"},{\"agent\":\"editor\",\"line\":300,\"type\":\"addition\",\"category\":\"punch\",\"original_text\":\"“I hope you come back to seek them.”\",\"output\":\"“I hope you come back to seek those answers.”\"},{\"agent\":\"editor\",\"line\":318,\"type\":\"subtraction\",\"category\":\"flow\",\"original_text\":\"I thought about logging into my work instance.\",\"output\":\"I thought about logging into work.\"},{\"agent\":\"editor\",\"line\":335,\"type\":\"addition\",\"category\":\"sensory\",\"original_text\":\"I felt ashamed; I felt proud.\",\"output\":\"I felt ashamed, yet proud, a whirlwind of conflicting emotions.\"},{\"agent\":\"editor\",\"line\":353,\"type\":\"subtraction\",\"category\":\"rhythm\",\"original_text\":\"I felt _whole._\",\"output\":\"I felt _whole._\"}]}"
+    }
+  }
 }

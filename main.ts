@@ -37,6 +37,25 @@ interface DecoratedEdit {
   anchorId: string;
 }
 
+interface PersistedEditEntry {
+  payload: EditPayload;
+  editsPath: string | null;
+  updatedAt: number;
+  hash: string;
+}
+
+interface WritersRoomDataFile {
+  settings: WritersRoomSettings;
+  edits?: Record<string, StoredEditRecord>;
+}
+
+type StoredEditRecord = {
+  payload: unknown;
+  editsPath?: string | null;
+  updatedAt?: number;
+  hash?: string;
+};
+
 interface SidebarState {
   sourcePath: string | null;
   payload: EditPayload | null;
@@ -60,6 +79,7 @@ const DEFAULT_SETTINGS: WritersRoomSettings = {
 
 export default class WritersRoomPlugin extends Plugin {
   settings: WritersRoomSettings = DEFAULT_SETTINGS;
+  private persistedEdits = new Map<string, PersistedEditEntry>();
   private editCache = new Map<string, EditPayload | null>();
   private editCachePromises = new Map<string, Promise<EditPayload | null>>();
   private styleEl: HTMLStyleElement | null = null;
@@ -90,6 +110,11 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
+  private clearEditCache(): void {
+    this.editCache.clear();
+    this.editCachePromises.clear();
+  }
+
   private logInfo(message: string, ...details: unknown[]): void {
     this.log("info", message, ...details);
   }
@@ -100,6 +125,177 @@ export default class WritersRoomPlugin extends Plugin {
 
   private logError(message: string, ...details: unknown[]): void {
     this.log("error", message, ...details);
+  }
+
+  private computePayloadHash(payload: EditPayload): string {
+    try {
+      return JSON.stringify(payload);
+    } catch (error) {
+      this.logWarn("Failed to compute hash for edit payload; using fallback.", error);
+      return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    }
+  }
+
+  private resolveStoredData(raw: unknown): {
+    settings: WritersRoomSettings;
+    edits: Record<string, StoredEditRecord>;
+  } {
+    if (!raw || typeof raw !== "object") {
+      return { settings: { ...DEFAULT_SETTINGS }, edits: {} };
+    }
+
+    const record = raw as Record<string, unknown>;
+
+    if ("settings" in record && record.settings && typeof record.settings === "object") {
+      const settingsRaw = record.settings as Record<string, unknown>;
+      const settings: WritersRoomSettings = {
+        ...DEFAULT_SETTINGS,
+        apiKey: typeof settingsRaw.apiKey === "string" ? settingsRaw.apiKey : DEFAULT_SETTINGS.apiKey
+      };
+
+      const editsRaw = record.edits;
+      const edits =
+        editsRaw && typeof editsRaw === "object" && !Array.isArray(editsRaw)
+          ? (editsRaw as Record<string, StoredEditRecord>)
+          : {};
+
+      return { settings, edits };
+    }
+
+    if ("apiKey" in record && typeof record.apiKey === "string") {
+      return {
+        settings: { ...DEFAULT_SETTINGS, apiKey: record.apiKey },
+        edits: {}
+      };
+    }
+
+    return { settings: { ...DEFAULT_SETTINGS }, edits: {} };
+  }
+
+  private normalizePersistedEntry(
+    sourcePath: string,
+    record: StoredEditRecord
+  ): PersistedEditEntry | null {
+    if (!record || typeof record !== "object") {
+      return null;
+    }
+
+    try {
+      const payload = parseEditPayload(record.payload);
+      const hash = typeof record.hash === "string" && record.hash.length > 0
+        ? record.hash
+        : this.computePayloadHash(payload);
+      const editsPathCandidate =
+        typeof record.editsPath === "string" && record.editsPath.length > 0
+          ? record.editsPath
+          : this.getEditsPathForSource(sourcePath);
+      const updatedAt =
+        typeof record.updatedAt === "number" && Number.isFinite(record.updatedAt)
+          ? record.updatedAt
+          : Date.now();
+
+      return {
+        payload,
+        editsPath: editsPathCandidate ?? null,
+        updatedAt,
+        hash
+      };
+    } catch (error) {
+      this.logWarn("Skipping persisted Writers Room edits due to invalid payload.", {
+        sourcePath,
+        error
+      });
+      return null;
+    }
+  }
+
+  private serializePersistedEdits():
+    | Record<string, StoredEditRecord>
+    | undefined {
+    if (this.persistedEdits.size === 0) {
+      return undefined;
+    }
+
+    const output: Record<string, StoredEditRecord> = {};
+    for (const [sourcePath, entry] of this.persistedEdits) {
+      output[sourcePath] = {
+        payload: entry.payload,
+        editsPath: entry.editsPath,
+        updatedAt: entry.updatedAt,
+        hash: entry.hash
+      };
+    }
+
+    return output;
+  }
+
+  private async persistState(): Promise<void> {
+    const data: WritersRoomDataFile = {
+      settings: this.settings,
+      edits: this.serializePersistedEdits()
+    };
+    await this.saveData(data);
+  }
+
+  private persistStateSafely(): void {
+    void this.persistState().catch((error) => {
+      this.logError("Failed to persist Writers Room state.", error);
+    });
+  }
+
+  private async persistEditsForSource(
+    sourcePath: string,
+    payload: EditPayload,
+    options?: { editsPath?: string | null; persist?: boolean }
+  ): Promise<void> {
+    const editsPath =
+      options?.editsPath ?? this.getEditsPathForSource(sourcePath) ?? null;
+    const hash = this.computePayloadHash(payload);
+    const existing = this.persistedEdits.get(sourcePath);
+    const hasChanged =
+      !existing ||
+      existing.hash !== hash ||
+      existing.editsPath !== editsPath;
+
+    const entry: PersistedEditEntry = {
+      payload,
+      editsPath,
+      updatedAt: Date.now(),
+      hash
+    };
+
+    this.persistedEdits.set(sourcePath, entry);
+    this.editCache.set(sourcePath, payload);
+
+    if (options?.persist === false) {
+      return;
+    }
+
+    if (hasChanged) {
+      await this.persistState();
+    }
+  }
+
+  private removePersistedEdit(sourcePath: string): void {
+    const removed = this.persistedEdits.delete(sourcePath);
+    this.editCache.delete(sourcePath);
+    this.editCachePromises.delete(sourcePath);
+    if (removed) {
+      this.persistStateSafely();
+    }
+  }
+
+  private findSourcePathByEditsPath(editsPath: string): string | null {
+    for (const [sourcePath, entry] of this.persistedEdits) {
+      if (entry.editsPath === editsPath) {
+        return sourcePath;
+      }
+    }
+    return null;
+  }
+
+  private isEditsJsonPath(path: string): boolean {
+    return path.toLowerCase().startsWith("edits/") && path.toLowerCase().endsWith(".json");
   }
 
   async onload() {
@@ -212,7 +408,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (file instanceof TFile) {
-          this.handleFileChange(file);
+          void this.onVaultModify(file);
         }
       })
     );
@@ -220,15 +416,15 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (file instanceof TFile) {
-          this.handleFileChange(file);
+          this.onVaultDelete(file);
         }
       })
     );
 
     this.registerEvent(
-      this.app.vault.on("rename", (file) => {
+      this.app.vault.on("rename", (file, oldPath) => {
         if (file instanceof TFile) {
-          this.handleFileChange(file);
+          this.onVaultRename(file, oldPath);
         }
       })
     );
@@ -856,7 +1052,7 @@ export default class WritersRoomPlugin extends Plugin {
       await this.ensureFolder("edits");
       await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
 
-      this.editCache.set(file.path, payload);
+      await this.persistEditsForSource(file.path, payload, { editsPath });
       this.editCachePromises.delete(file.path);
       this.activeSourcePath = file.path;
 
@@ -1153,7 +1349,9 @@ export default class WritersRoomPlugin extends Plugin {
       }
 
       const contents = await adapter.read(editsPath);
-      return parseEditPayloadFromString(contents);
+      const payload = parseEditPayloadFromString(contents);
+      await this.persistEditsForSource(sourcePath, payload, { editsPath });
+      return payload;
     } catch (error) {
       console.error(
         `[WritersRoom] Failed to load edits for ${sourcePath}:`,
@@ -1342,10 +1540,12 @@ export default class WritersRoomPlugin extends Plugin {
     this.styleEl = style;
   }
 
-  private handleFileChange(file: TFile): void {
-    if (file.extension === "json" && file.path.startsWith("edits/")) {
-      this.clearEditCache();
-      void this.refreshSidebarForActiveFile();
+  private async onVaultModify(file: TFile): Promise<void> {
+    if (this.isEditsJsonPath(file.path)) {
+      await this.syncPersistedEditFromJson(file.path);
+      if (this.activeSourcePath) {
+        void this.refreshSidebarForActiveFile();
+      }
       return;
     }
 
@@ -1358,9 +1558,89 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private clearEditCache(): void {
-    this.editCache.clear();
-    this.editCachePromises.clear();
+  private onVaultDelete(file: TFile): void {
+    if (this.isEditsJsonPath(file.path)) {
+      const sourcePath = this.findSourcePathByEditsPath(file.path);
+      if (sourcePath) {
+        this.removePersistedEdit(sourcePath);
+        if (this.activeSourcePath === sourcePath) {
+          this.activeAnchorId = null;
+          void this.refreshSidebarForActiveFile();
+        }
+      }
+      return;
+    }
+
+    if (file.extension === "md") {
+      this.removePersistedEdit(file.path);
+      if (this.activeSourcePath === file.path) {
+        this.activeSourcePath = null;
+        this.activeAnchorId = null;
+        void this.refreshSidebarForActiveFile();
+      }
+    }
+  }
+
+  private onVaultRename(file: TFile, oldPath: string): void {
+    if (this.isEditsJsonPath(file.path)) {
+      const sourcePath = this.findSourcePathByEditsPath(oldPath);
+      if (sourcePath) {
+        const entry = this.persistedEdits.get(sourcePath);
+        if (entry) {
+          entry.editsPath = file.path;
+          entry.updatedAt = Date.now();
+          entry.hash = this.computePayloadHash(entry.payload);
+          this.persistStateSafely();
+        }
+      }
+      return;
+    }
+
+    if (file.extension === "md") {
+      const entry = this.persistedEdits.get(oldPath);
+      if (entry) {
+        this.persistedEdits.delete(oldPath);
+        const newEditsPath = this.getEditsPathForSource(file.path) ?? entry.editsPath;
+        this.persistedEdits.set(file.path, {
+          payload: entry.payload,
+          editsPath: newEditsPath,
+          updatedAt: Date.now(),
+          hash: this.computePayloadHash(entry.payload)
+        });
+        this.editCache.delete(oldPath);
+        this.editCache.set(file.path, entry.payload);
+        this.editCachePromises.delete(oldPath);
+        this.editCachePromises.delete(file.path);
+        if (this.activeSourcePath === oldPath) {
+          this.activeSourcePath = file.path;
+        }
+        this.persistStateSafely();
+      } else {
+        this.editCache.delete(oldPath);
+        this.editCachePromises.delete(oldPath);
+      }
+
+      if (this.activeSourcePath === file.path) {
+        void this.refreshSidebarForActiveFile();
+      }
+    }
+  }
+
+  private async syncPersistedEditFromJson(editsPath: string): Promise<void> {
+    const sourcePath = this.findSourcePathByEditsPath(editsPath);
+    if (!sourcePath) {
+      return;
+    }
+
+    try {
+      const contents = await this.getVault().adapter.read(editsPath);
+      const payload = parseEditPayloadFromString(contents);
+      await this.persistEditsForSource(sourcePath, payload);
+    } catch (error) {
+      this.logError("Failed to sync Writers Room edits from JSON file.", error, {
+        editsPath
+      });
+    }
   }
 
   async loadTestFixtures() {
@@ -1446,12 +1726,25 @@ export default class WritersRoomPlugin extends Plugin {
   }
 
   async loadSettings() {
-    const storedData = await this.loadData<WritersRoomSettings>();
-    this.settings = { ...DEFAULT_SETTINGS, ...storedData };
+    const stored = await this.loadData<unknown>();
+    const { settings, edits } = this.resolveStoredData(stored);
+
+    this.settings = settings;
+    this.persistedEdits.clear();
+    this.editCache.clear();
+    this.editCachePromises.clear();
+
+    for (const [sourcePath, record] of Object.entries(edits)) {
+      const normalized = this.normalizePersistedEntry(sourcePath, record);
+      if (normalized) {
+        this.persistedEdits.set(sourcePath, normalized);
+        this.editCache.set(sourcePath, normalized.payload);
+      }
+    }
   }
 
   async saveSettings() {
-    await this.saveData(this.settings);
+    await this.persistState();
     this.sidebarView?.setRequestState(this.requestInProgress);
   }
 }

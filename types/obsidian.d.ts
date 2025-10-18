@@ -5,7 +5,8 @@ declare module "obsidian" {
   }
 
   export interface Workspace {
-    on(event: string, callback: (file: TFile | null) => void): EventRef;
+    on(event: "file-open", callback: (file: TFile | null) => void): EventRef;
+    on(event: string, callback: (...args: any[]) => void): EventRef;
     getActiveFile(): TFile | null;
     openLinkText?(path: string, sourcePath: string, newLeaf?: boolean): Promise<void>;
     getLeavesOfType(viewType: string): WorkspaceLeaf[];
@@ -94,7 +95,8 @@ declare module "obsidian" {
     createFolder(path: string): Promise<TFolder>;
     modify(file: TFile, data: string): Promise<void>;
     read(file: TFile): Promise<string>;
-    on(event: string, callback: (file: TAbstractFile) => void): EventRef;
+    on(event: "rename", callback: (file: TAbstractFile, oldPath: string) => void): EventRef;
+    on(event: string, callback: (...args: any[]) => void): EventRef;
   }
 
   export interface Command {
