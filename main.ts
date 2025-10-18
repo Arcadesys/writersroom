@@ -393,14 +393,6 @@ const DEFAULT_SETTINGS: WritersRoomSettings = {
   audibleFeedback: true
 };
 
-const TOKEN_TICKER_VARIANTS: Array<{ label: string; badge: string }> = [
-  { label: "Token sparkle parade", badge: "***" },
-  { label: "Story fuel gauge", badge: "+++" },
-  { label: "Muse meter", badge: "~~~" },
-  { label: "Cadence counter", badge: "///" },
-  { label: "Idea drumbeat", badge: ">>>" }
-];
-
 interface ColorPalette {
   addition: { bg: string; border: string };
   replacement: { bg: string; border: string };
@@ -684,21 +676,11 @@ interface SidebarProgressEntry {
   tone: SidebarProgressTone;
 }
 
-interface TokenTickerState {
-  target: number;
-  label: string;
-  badge: string;
-  generation: number;
-  lastBroadcastAt: number;
-  isComplete?: boolean;
-}
-
 interface SidebarState {
   sourcePath: string | null;
   payload: EditPayload | null;
   selectedAnchorId?: string | null;
   progressLog?: SidebarProgressEntry[];
-  tokenTicker?: TokenTickerState | null;
 }
 
 interface SidebarAction {
@@ -738,8 +720,6 @@ export default class WritersRoomPlugin extends Plugin {
   private requestProgressTimer: number | null = null;
   private requestProgressMessageIndex = -1;
   private requestProgressActiveLabel: string | null = null;
-  private requestTokenStats: TokenTickerState | null = null;
-  private tokenTickerGeneration = 0;
   audiconPlayer: AudiconPlayer | null = null; // Public for settings access
 
   private log(
@@ -2472,9 +2452,7 @@ export default class WritersRoomPlugin extends Plugin {
     view.setState({
       ...state,
       progressLog:
-        state.progressLog ?? this.getProgressEntriesForSource(state.sourcePath ?? this.activeSourcePath),
-      tokenTicker:
-        state.tokenTicker ?? this.getTokenTickerForSource(state.sourcePath ?? this.activeSourcePath)
+        state.progressLog ?? this.getProgressEntriesForSource(state.sourcePath ?? this.activeSourcePath)
     });
     return view;
   }
@@ -3026,76 +3004,12 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private getNextTokenTickerVariant(): { label: string; badge: string } {
-    const index = this.tokenTickerGeneration % TOKEN_TICKER_VARIANTS.length;
-    return TOKEN_TICKER_VARIANTS[index] ?? TOKEN_TICKER_VARIANTS[0];
-  }
-
-  private beginTokenTicker(): void {
-    const variant = this.getNextTokenTickerVariant();
-    this.tokenTickerGeneration += 1;
-    this.requestTokenStats = {
-      target: 0,
-      label: variant.label,
-      badge: variant.badge,
-      generation: this.tokenTickerGeneration,
-      lastBroadcastAt: Date.now()
-    };
-  }
-
-  private updateTokenTicker(target: number, options?: { force?: boolean; complete?: boolean }): void {
-    if (!this.requestTokenStats) {
-      this.beginTokenTicker();
-    }
-
-    if (!this.requestTokenStats) {
-      return;
-    }
-
-    const stats = this.requestTokenStats;
-
-    const targetIncreased = target > stats.target;
-    if (targetIncreased) {
-      stats.target = target;
-    }
-
-    if (options?.complete) {
-      stats.isComplete = true;
-    }
-
-    const now = Date.now();
-    const shouldBroadcast =
-      options?.complete ||
-      targetIncreased ||
-      !stats.lastBroadcastAt ||
-      now - stats.lastBroadcastAt >= 200 ||
-      options?.force;
-
-    if (shouldBroadcast) {
-      stats.lastBroadcastAt = now;
-      this.emitProgressUpdate();
-    }
-  }
-
-  private markTokenTickerComplete(finalCount?: number): void {
-    if (!this.requestTokenStats) {
-      return;
-    }
-    const target = Math.max(finalCount ?? this.requestTokenStats.target, this.requestTokenStats.target);
-    this.updateTokenTicker(target, { force: true, complete: true });
-  }
-
-  private clearTokenTicker(): void {
-    this.requestTokenStats = null;
-  }
-
   private startRequestProgress(sourcePath: string, initialMessage: string): void {
     this.cancelRequestProgressTimer();
     this.requestProgressSource = sourcePath;
     this.requestProgressEntries = [{ message: initialMessage, tone: "active" }];
     this.requestProgressActiveLabel = initialMessage;
     this.requestProgressMessageIndex = -1;
-    this.beginTokenTicker();
     this.emitProgressUpdate();
   }
 
@@ -3162,7 +3076,6 @@ export default class WritersRoomPlugin extends Plugin {
       entry.tone = "success";
     });
     this.requestProgressActiveLabel = null;
-    this.markTokenTickerComplete();
     if (message) {
       this.requestProgressEntries.push({ message, tone: "success" });
       if (this.requestProgressEntries.length > 8) {
@@ -3182,7 +3095,6 @@ export default class WritersRoomPlugin extends Plugin {
       }
     });
     this.requestProgressActiveLabel = null;
-    this.markTokenTickerComplete();
     this.requestProgressEntries.push({ message, tone: "error" });
     if (this.requestProgressEntries.length > 8) {
       this.requestProgressEntries = this.requestProgressEntries.slice(-8);
@@ -3196,7 +3108,6 @@ export default class WritersRoomPlugin extends Plugin {
     this.requestProgressSource = null;
     this.requestProgressMessageIndex = -1;
     this.requestProgressActiveLabel = null;
-    this.clearTokenTicker();
     this.emitProgressUpdate();
   }
 
@@ -3219,19 +3130,6 @@ export default class WritersRoomPlugin extends Plugin {
     return this.requestProgressEntries.map((entry) => ({ ...entry }));
   }
 
-  private getTokenTickerForSource(sourcePath: string | null): TokenTickerState | null {
-    if (!sourcePath) {
-      return null;
-    }
-    if (this.requestProgressSource !== sourcePath) {
-      return null;
-    }
-    if (!this.requestTokenStats) {
-      return null;
-    }
-    return { ...this.requestTokenStats };
-  }
-
   private emitProgressUpdate(): void {
     if (!this.sidebarView) {
       return;
@@ -3239,14 +3137,12 @@ export default class WritersRoomPlugin extends Plugin {
 
     const sourcePath = this.activeSourcePath ?? this.requestProgressSource;
     const progressLog = this.getProgressEntriesForSource(sourcePath);
-    const tokenTicker = this.getTokenTickerForSource(sourcePath);
 
     this.sidebarView.setState({
       sourcePath: sourcePath ?? null,
       payload: this.activePayload,
       selectedAnchorId: this.activeAnchorId,
-      progressLog,
-      tokenTicker
+      progressLog
     });
   }
 
@@ -3325,6 +3221,13 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
+    // Check word count limit
+    const wordCount = noteContents.trim().split(/\s+/).length;
+    if (wordCount > 4000) {
+      new Notice(`Your note is too long (${wordCount} words). Please limit to 4000 words or less.`);
+      return;
+    }
+
     this.activeSourcePath = file.path;
     this.activeAnchorId = null;
     this.activeEditIndex = null;
@@ -3344,7 +3247,7 @@ export default class WritersRoomPlugin extends Plugin {
     });
 
     this.setRequestState(true);
-    this.startRequestProgress(file.path, "Sending your note to the Writers…");
+    this.startRequestProgress(file.path, "The Writers are reviewing your work. This can take up to five minutes…");
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
     // Play request start audicon for accessibility
@@ -3423,7 +3326,7 @@ Malformed or blank input example:
         throw new Error("Fetch API is unavailable in this environment.");
       }
 
-      this.advanceRequestProgress("Writers are drafting their edits…");
+      this.advanceRequestProgress("Processing... please be patient, this may take several minutes…");
       const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -3506,7 +3409,6 @@ Malformed or blank input example:
               // Check for usage information (sent in final chunk when include_usage is true)
               if (chunk.usage?.completion_tokens) {
                 tokensReceived = chunk.usage.completion_tokens;
-                this.updateTokenTicker(tokensReceived);
               }
 
               const delta = chunk.choices?.[0]?.delta;
@@ -3518,7 +3420,6 @@ Malformed or blank input example:
                 completion += delta.content;
                 // Estimate tokens as we go (roughly 4 characters per token)
                 tokensReceived = Math.floor(completion.length / 4);
-                this.updateTokenTicker(tokensReceived);
               }
 
               if (delta.reasoning_content) {
@@ -3537,13 +3438,6 @@ Malformed or blank input example:
                     lastReasoningUpdate = now;
                   }
                 }
-              } else {
-                // If no reasoning content, periodically update with token count
-                const now = Date.now();
-                if (now - lastProgressUpdate >= progressUpdateMs) {
-                  this.updateActiveProgressMessage(`Received ${tokensReceived} tokens...`);
-                  lastProgressUpdate = now;
-                }
               }
             } catch (parseError) {
               this.logWarn("Failed to parse streaming chunk.", { line: trimmed, error: parseError });
@@ -3554,14 +3448,7 @@ Malformed or blank input example:
         reader.releaseLock();
       }
 
-      // If we received data but no reasoning updates, still show progress
-      if (hasReceivedAnyData && accumulatedReasoning.length === 0) {
-        this.updateActiveProgressMessage(`Completed - received ${tokensReceived} tokens`);
-      }
-
-      this.markTokenTickerComplete(tokensReceived);
-
-      this.advanceRequestProgress("Compiling the Writers response…");
+      this.advanceRequestProgress("Almost done…");
 
       if (typeof completion !== "string" || completion.trim().length === 0) {
         throw new Error("OpenAI response did not include text content.");
@@ -3572,7 +3459,7 @@ Malformed or blank input example:
         throw new Error("OpenAI response did not include a JSON payload.");
       }
 
-    this.advanceRequestProgress("Validating and saving the edits…");
+    this.advanceRequestProgress("Finalizing your edits…");
 
     const payload = this.parseAiPayload(jsonText);
 
@@ -3842,8 +3729,7 @@ Malformed or blank input example:
         sourcePath: this.activeSourcePath,
         payload,
         selectedAnchorId: this.activeAnchorId,
-        progressLog: this.getProgressEntriesForSource(this.activeSourcePath),
-        tokenTicker: this.getTokenTickerForSource(this.activeSourcePath)
+        progressLog: this.getProgressEntriesForSource(this.activeSourcePath)
       });
 
       this.sidebarView.updateSelection(this.activeAnchorId);
@@ -4775,17 +4661,10 @@ class WritersRoomSidebarView extends ItemView {
     sourcePath: null,
     payload: null,
     selectedAnchorId: null,
-    progressLog: [],
-    tokenTicker: null
+    progressLog: []
   };
   private requestButton: HTMLButtonElement | null = null;
   private isRequesting = false;
-  private tokenTickerEl: HTMLElement | null = null;
-  private tokenTickerLabelEl: HTMLElement | null = null;
-  private tokenTickerWrapper: HTMLElement | null = null;
-  private tokenAnimationFrame: number | null = null;
-  private displayedTokenCount = 0;
-  private currentTokenGeneration = -1;
   private collapsedEdits = new Set<string>(); // Track which edits are collapsed by anchor ID
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
@@ -4813,20 +4692,14 @@ class WritersRoomSidebarView extends ItemView {
 
   onClose(): void {
     this.plugin.unregisterSidebar(this);
-    this.stopTokenAnimation(true);
     this.collapsedEdits.clear();
     this.state = {
       sourcePath: null,
       payload: null,
       selectedAnchorId: null,
-      progressLog: [],
-      tokenTicker: null
+      progressLog: []
     };
     this.requestButton = null;
-    this.displayedTokenCount = 0;
-    this.currentTokenGeneration = -1;
-    this.tokenTickerEl = null;
-    this.tokenTickerLabelEl = null;
   }
 
   setState(state: SidebarState): void {
@@ -4838,8 +4711,7 @@ class WritersRoomSidebarView extends ItemView {
       selectedAnchorId: state.selectedAnchorId ?? null,
       progressLog: state.progressLog
         ? state.progressLog.map((entry) => ({ ...entry }))
-        : [],
-      tokenTicker: state.tokenTicker ? { ...state.tokenTicker } : null
+        : []
     };
     
     // Clear collapsed state when switching to a different document
@@ -4853,94 +4725,6 @@ class WritersRoomSidebarView extends ItemView {
   setRequestState(requesting: boolean): void {
     this.isRequesting = requesting;
     this.applyRequestState();
-  }
-
-  private stopTokenAnimation(resetCount: boolean): void {
-    if (this.tokenAnimationFrame !== null && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
-      window.cancelAnimationFrame(this.tokenAnimationFrame);
-    }
-    this.tokenAnimationFrame = null;
-    if (resetCount) {
-      this.displayedTokenCount = 0;
-      this.currentTokenGeneration = -1;
-    }
-  }
-
-  private formatTokenCount(value: number): string {
-    try {
-      return value.toLocaleString();
-    } catch {
-      return String(value);
-    }
-  }
-
-  private updateTokenDisplay(value: number, isComplete: boolean): void {
-    if (this.tokenTickerEl) {
-      const suffix = isComplete ? "" : "+";
-      this.tokenTickerEl.textContent = `${this.formatTokenCount(value)}${suffix}`;
-    }
-
-    if (this.tokenTickerLabelEl) {
-      const baseLabel = this.state.tokenTicker?.label ?? "Token ticker";
-      this.tokenTickerLabelEl.textContent = isComplete
-        ? `${baseLabel} complete!`
-        : `${baseLabel} (and counting...)`;
-    }
-
-    if (this.tokenTickerWrapper) {
-      if (isComplete) {
-        this.tokenTickerWrapper.addClass("is-complete");
-      } else {
-        this.tokenTickerWrapper.removeClass("is-complete");
-      }
-    }
-  }
-
-  private startTokenAnimation(target: number, isComplete: boolean): void {
-    const endValue = Math.max(target, 0);
-
-    if (!this.tokenTickerEl) {
-      this.displayedTokenCount = endValue;
-      return;
-    }
-
-    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
-      this.displayedTokenCount = endValue;
-      this.updateTokenDisplay(endValue, isComplete);
-      return;
-    }
-
-    this.stopTokenAnimation(false);
-    const startValue = this.displayedTokenCount;
-
-    if (endValue <= startValue) {
-      this.displayedTokenCount = endValue;
-      this.updateTokenDisplay(endValue, isComplete);
-      return;
-    }
-
-    const range = endValue - startValue;
-    const duration = Math.min(2000, 420 + range * 20);
-    const startTime = typeof performance !== "undefined" && typeof performance.now === "function"
-      ? performance.now()
-      : Date.now();
-
-    const step = (timestamp: number) => {
-      const elapsed = timestamp - startTime;
-      const progress = Math.min(1, duration === 0 ? 1 : elapsed / duration);
-      const eased = 1 - Math.pow(1 - progress, 3);
-      const value = Math.max(startValue, Math.round(startValue + range * eased));
-      this.displayedTokenCount = value;
-      this.updateTokenDisplay(value, progress >= 1 ? isComplete : false);
-      if (progress < 1) {
-        this.tokenAnimationFrame = window.requestAnimationFrame(step);
-      } else {
-        this.tokenAnimationFrame = null;
-        this.updateTokenDisplay(endValue, isComplete);
-      }
-    };
-
-    this.tokenAnimationFrame = window.requestAnimationFrame(step);
   }
 
   private formatAnnotationText(text: string): HTMLElement {
@@ -4976,54 +4760,12 @@ class WritersRoomSidebarView extends ItemView {
     return container;
   }
 
-  private renderTokenTicker(parent: HTMLElement): void {
-    const tickerState = this.state.tokenTicker;
-    if (!tickerState) {
-      this.currentTokenGeneration = -1;
-      this.displayedTokenCount = 0;
-      this.tokenTickerWrapper = null;
-      this.tokenTickerEl = null;
-      this.tokenTickerLabelEl = null;
-      return;
-    }
-
-    if (tickerState.generation !== this.currentTokenGeneration) {
-      this.displayedTokenCount = 0;
-      this.currentTokenGeneration = tickerState.generation;
-    }
-
-    const wrapper = parent.createDiv({ cls: "writersroom-token-ticker" });
-    if (tickerState.isComplete) {
-      wrapper.addClass("is-complete");
-    }
-
-    wrapper.createDiv({ cls: "writersroom-token-badge", text: tickerState.badge });
-
-    const contentEl = wrapper.createDiv({ cls: "writersroom-token-content" });
-    const countEl = contentEl.createDiv({
-      cls: "writersroom-token-count",
-      text: this.formatTokenCount(this.displayedTokenCount)
-    });
-    const labelEl = contentEl.createDiv({ cls: "writersroom-token-label" });
-
-    this.tokenTickerWrapper = wrapper;
-    this.tokenTickerEl = countEl;
-    this.tokenTickerLabelEl = labelEl;
-
-    this.updateTokenDisplay(this.displayedTokenCount, Boolean(tickerState.isComplete));
-    this.startTokenAnimation(tickerState.target, Boolean(tickerState.isComplete));
-  }
-
   updateSelection(anchorId: string | null): void {
     this.state.selectedAnchorId = anchorId ?? null;
     this.applySelection();
   }
 
   private render(): void {
-    this.stopTokenAnimation(false);
-    this.tokenTickerEl = null;
-    this.tokenTickerLabelEl = null;
-    this.tokenTickerWrapper = null;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("writersroom-sidebar");
@@ -5070,16 +4812,13 @@ class WritersRoomSidebarView extends ItemView {
       });
     }
 
-    if (this.state.tokenTicker) {
-      const tickerHost = containerEl.createDiv({ cls: "writersroom-token-wrapper" });
-      this.renderTokenTicker(tickerHost);
-    } else {
-      this.currentTokenGeneration = -1;
-      this.displayedTokenCount = 0;
-    }
-
+    const edits = this.state.payload?.edits ?? [];
     const progressEntries = this.state.progressLog ?? [];
-    if (progressEntries.length > 0) {
+    
+    // Only show progress tracker when there's an active request or recent error, and no edits available yet
+    const shouldShowProgress = progressEntries.length > 0 && (this.isRequesting || edits.length === 0);
+    
+    if (shouldShowProgress) {
       const progressEl = containerEl.createDiv({
         cls: "writersroom-sidebar-progress"
       });
@@ -5112,8 +4851,6 @@ class WritersRoomSidebarView extends ItemView {
     const listEl = containerEl.createDiv({
       cls: "writersroom-sidebar-list"
     });
-
-    const edits = this.state.payload?.edits ?? [];
     if (!this.state.payload || edits.length === 0) {
       listEl.createEl("div", {
         cls: "writersroom-sidebar-empty",
@@ -5156,7 +4893,7 @@ class WritersRoomSidebarView extends ItemView {
 
       contentEl.createEl("div", {
         cls: "writersroom-sidebar-item-heading",
-        text: `Line ${edit.line} · ${edit.type}`
+        text: edit.type
       });
 
       // If collapsed, only show heading and stop
