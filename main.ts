@@ -14,6 +14,9 @@ import {
   WorkspaceLeaf
 } from "obsidian";
 
+import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
+
 import {
   EditEntry,
   EditPayload,
@@ -23,6 +26,76 @@ import {
 } from "./editParser";
 
 const WR_VIEW_TYPE = "writersroom-sidebar";
+
+interface EditorHighlightSpec {
+  from: number;
+  to: number;
+  className: string;
+  attributes: Record<string, string>;
+}
+
+export const setEditorHighlightsEffect = StateEffect.define<EditorHighlightSpec[]>();
+
+export const writersRoomEditorHighlightsField = StateField.define<DecorationSet>({
+  create() {
+    console.info("[WritersRoom] StateField.create() called");
+    return Decoration.none;
+  },
+  update(value, transaction) {
+    console.info("[WritersRoom] StateField.update() called, effects:", transaction.effects.length);
+    let decorations = value.map(transaction.changes);
+    for (const effect of transaction.effects) {
+      if (effect.is(setEditorHighlightsEffect)) {
+        console.info("[WritersRoom] StateField.update() received setEditorHighlightsEffect with specs:", effect.value.length);
+        decorations = buildEditorHighlightDecorations(transaction.state.doc, effect.value);
+      }
+    }
+    return decorations;
+  },
+  provide(field) {
+    return EditorView.decorations.from(field);
+  }
+});
+
+// Export the complete extension for registration
+export const writersRoomEditorExtension = [writersRoomEditorHighlightsField];
+
+function buildEditorHighlightDecorations(
+  doc: unknown,
+  specs: EditorHighlightSpec[]
+): DecorationSet {
+  console.info("[WritersRoom] buildEditorHighlightDecorations called with", specs.length, "specs");
+  
+  if (!specs.length) {
+    return Decoration.none;
+  }
+
+  const builder = new RangeSetBuilder<Decoration>();
+  const sorted = [...specs].sort((a, b) => a.from - b.from);
+
+  for (const spec of sorted) {
+    if (!(Number.isFinite(spec.from) && Number.isFinite(spec.to))) {
+      console.warn("[WritersRoom] Skipping invalid decoration range", spec);
+      continue;
+    }
+
+    // Use Decoration.line() for line-level decorations
+    // This decorates the line itself rather than wrapping content
+    const decoration = Decoration.line({
+      class: spec.className,
+      attributes: spec.attributes
+    });
+    
+    console.info("[WritersRoom] Creating line decoration at position", spec.from, "with class", spec.className);
+    
+    // For line decorations, we only need the start position
+    builder.add(spec.from, spec.from, decoration);
+  }
+
+  const result = builder.finish();
+  console.info("[WritersRoom] Built decoration set with size:", result.size);
+  return result;
+}
 
 interface HighlightOptions {
   id: string;
@@ -97,6 +170,7 @@ export default class WritersRoomPlugin extends Plugin {
   private activePayload: EditPayload | null = null;
   private activeEditIndex: number | null = null;
   private highlightRetryHandle: number | null = null;
+  private editorHighlightState = new WeakMap<EditorView, string>();
   private requestInProgress = false;
 
   private log(
@@ -323,6 +397,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.editCache.set(sourcePath, payload);
     if (this.activeSourcePath === sourcePath) {
       this.activePayload = payload;
+      this.refreshEditorHighlights();
     }
 
     if (options?.persist === false) {
@@ -345,6 +420,7 @@ export default class WritersRoomPlugin extends Plugin {
       this.activePayload = null;
       this.activeEditIndex = null;
       this.activeAnchorId = null;
+      this.refreshEditorHighlights();
     }
   }
 
@@ -373,9 +449,54 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerView(WR_VIEW_TYPE, (leaf) => new WritersRoomSidebarView(leaf, this));
 
     this.injectStyles();
+    
+    // Register editor extension for CodeMirror highlights
+    // Must be an array for proper extension registration
+    (this as unknown as { registerEditorExtension: (extension: unknown) => void })
+      .registerEditorExtension(writersRoomEditorExtension);
+    this.logInfo("Registered editor highlight extension");
+    
+    // Delay to ensure editors pick up the extension
+    setTimeout(() => {
+      this.logInfo("Triggering initial highlight refresh");
+      this.refreshEditorHighlights();
+    }, 100);
+    
     this.registerHighlighting();
     this.registerVaultListeners();
     this.registerWorkspaceListeners();
+
+    // Register click handler for both preview and edit mode highlights
+    (this as unknown as {
+      registerDomEvent: (
+        el: Document | HTMLElement,
+        type: string,
+        callback: (event: Event) => void
+      ) => void;
+    }).registerDomEvent(document, "click", (event: Event) => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement)) {
+        return;
+      }
+
+      const anchor = target.closest<HTMLElement>("[data-writersroom-anchor]");
+      if (!anchor) {
+        return;
+      }
+
+      const source = anchor.dataset.wrSource;
+      const anchorId =
+        anchor.dataset.wrAnchor ??
+        anchor.getAttribute("data-writersroom-anchor");
+
+      if (!source || !anchorId) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void this.handleAnchorClick(source, anchorId);
+    });
 
     this.addSettingTab(new WritersRoomSettingTab(this.app, this));
 
@@ -409,6 +530,15 @@ export default class WritersRoomPlugin extends Plugin {
         return true;
       }
     });
+
+    const workspaceWithLayout = this.app.workspace as unknown as {
+      onLayoutReady?: (callback: () => void) => void;
+    };
+    workspaceWithLayout.onLayoutReady?.(() => {
+      this.refreshEditorHighlights();
+    });
+
+    this.refreshEditorHighlights();
   }
 
   private getVault(): Vault {
@@ -458,6 +588,7 @@ export default class WritersRoomPlugin extends Plugin {
     }
     this.styleEl = null;
     this.clearHighlightRetry();
+    this.clearEditorHighlights();
     this.clearEditCache();
   }
 
@@ -511,6 +642,7 @@ export default class WritersRoomPlugin extends Plugin {
           this.activeEditIndex = null;
         }
         void this.refreshSidebarForActiveFile();
+        this.refreshEditorHighlights();
       })
     );
   }
@@ -748,8 +880,391 @@ export default class WritersRoomPlugin extends Plugin {
       return null;
     }
 
-    range.detach?.();
-    return wrapper;
+  range.detach?.();
+  return wrapper;
+  }
+
+  private refreshEditorHighlights(): void {
+    this.applyEditorHighlightsToViews();
+  }
+
+  private applyEditorHighlightsToViews(): void {
+    const targetPath = this.activeSourcePath;
+    const payload = this.activePayload;
+    const activeAnchorId = this.activeAnchorId;
+    const workspace = this.app.workspace;
+    const leaves =
+      typeof workspace.getLeavesOfType === "function"
+        ? workspace.getLeavesOfType("markdown")
+        : [];
+
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView)) {
+        continue;
+      }
+
+      const editorView = this.getEditorViewFromMarkdownView(view);
+      if (!editorView) {
+        continue;
+      }
+
+      const viewPath = view.file?.path ?? null;
+      if (
+        !targetPath ||
+        !payload ||
+        payload.edits.length === 0 ||
+        viewPath !== targetPath
+      ) {
+        this.dispatchEditorHighlights(editorView, []);
+        continue;
+      }
+
+      const specs = this.buildEditorHighlightSpecs(
+        editorView,
+        payload,
+        targetPath,
+        activeAnchorId ?? null
+      );
+      
+      // Debug logging
+      if (specs.length > 0) {
+        this.logInfo(`Applying ${specs.length} editor highlights`, { 
+          viewPath, 
+          specs: specs.slice(0, 2) 
+        });
+      }
+      
+      this.dispatchEditorHighlights(editorView, specs);
+    }
+  }
+
+  private getEditorViewFromMarkdownView(view: MarkdownView): EditorView | null {
+    const editorAny = view.editor as unknown as { cm?: EditorView };
+    const result = editorAny?.cm ?? null;
+    this.logInfo("Getting editor view", { 
+      hasView: !!result, 
+      path: view.file?.path 
+    });
+    return result;
+  }
+
+  private buildEditorHighlightSpecs(
+    editorView: EditorView,
+    payload: EditPayload,
+    sourcePath: string,
+    activeAnchorId: string | null
+  ): EditorHighlightSpec[] {
+    const specs: EditorHighlightSpec[] = [];
+    const doc = editorView.state?.doc ?? null;
+    if (!doc) {
+      return specs;
+    }
+
+    const totalLines = doc.lines;
+
+    payload.edits.forEach((edit, index) => {
+      const anchorId = this.buildAnchorId(edit.line, index);
+      const classList = [...this.getHighlightClasses(edit)];
+      if (activeAnchorId === anchorId) {
+        classList.push("writersroom-highlight-active");
+      }
+
+      // Validate line number
+      const lineNumber = Math.max(1, edit.line);
+      if (lineNumber > totalLines) {
+        this.logWarn(
+          `Edit references line ${lineNumber} but document only has ${totalLines} lines. Skipping.`
+        );
+        return;
+      }
+
+      let lineInfo: { from: number; to: number; text: string } | null = null;
+      
+      try {
+        const docLine = doc.line(lineNumber);
+        if (docLine) {
+          lineInfo = {
+            from: docLine.from,
+            to: docLine.to,
+            text: docLine.text || ""
+          };
+        }
+      } catch (error) {
+        this.logWarn(`Failed to get line ${lineNumber} for highlight`, error);
+        return;
+      }
+
+      if (!lineInfo || lineInfo.from >= lineInfo.to) {
+        this.logWarn(
+          `Line ${lineNumber} has invalid range (from: ${lineInfo?.from}, to: ${lineInfo?.to})`
+        );
+        return;
+      }
+
+      const attributes: Record<string, string> = {
+        "data-writersroom-anchor": anchorId,
+        "data-wr-source": sourcePath,
+        "data-wr-index": String(index),
+        "data-wr-line": String(edit.line),
+        "data-wr-type": edit.type,
+        "data-wr-category": edit.category,
+        "data-wr-anchor": anchorId,
+        "data-wr-original": edit.original_text,
+        tabindex: "-1",
+        role: "button",
+        "aria-label": `Edit on line ${edit.line}: ${edit.type}`,
+        title: `Edit ${edit.type} (${edit.category})`,
+        "data-wr-bound": "editor"
+      };
+
+      if (typeof edit.output === "string") {
+        attributes["data-wr-output"] = edit.output;
+      }
+
+      specs.push({
+        from: lineInfo.from,
+        to: lineInfo.to,
+        className: classList.join(" "),
+        attributes
+      });
+    });
+
+    // Debug logging and stale data detection
+    const validSpecsRatio = specs.length / payload.edits.length;
+    
+    if (specs.length > 0 && validSpecsRatio >= 0.5) {
+      // Most edits are valid
+      this.logInfo(
+        `Built ${specs.length}/${payload.edits.length} highlight specs for ${sourcePath}`,
+        { totalLines }
+      );
+    } else if (payload.edits.length > 0 && validSpecsRatio < 0.5) {
+      // Less than 50% of edits are valid - likely stale data
+      this.logWarn(
+        `Built ${specs.length}/${payload.edits.length} highlight specs for ${sourcePath}. Document appears to have changed significantly. Clearing stale edits.`,
+        { totalLines, validSpecsRatio }
+      );
+      
+      // Clear stale edits automatically
+      // This happens when the file has been modified significantly since edits were saved
+      if (this.activeSourcePath === sourcePath) {
+        this.activePayload = null;
+      }
+      this.persistedEdits.delete(sourcePath);
+      void this.saveData({
+        settings: this.settings,
+        edits: Object.fromEntries(this.persistedEdits)
+      });
+      void this.refreshSidebarForActiveFile();
+    }
+
+    return specs;
+  }
+
+  private getEditorHighlightCandidates(edit: EditEntry): string[] {
+    const values = new Set<string>();
+    const addCandidate = (value: string | null | undefined) => {
+      if (typeof value !== "string") {
+        return;
+      }
+      if (!value.length) {
+        return;
+      }
+
+      const variants = [value, value.trim()];
+      for (const variant of variants) {
+        if (!variant) {
+          continue;
+        }
+        values.add(variant);
+        const collapsed = variant.replace(/\s+/g, " ");
+        if (collapsed && collapsed !== variant) {
+          values.add(collapsed);
+        }
+      }
+    };
+
+    addCandidate(edit.original_text);
+    if (typeof edit.output === "string") {
+      addCandidate(edit.output);
+    }
+
+    return Array.from(values).sort((a, b) => b.length - a.length);
+  }
+
+  private resolveEditorHighlightRange(
+    doc: {
+      line: (line: number) => { from: number; to: number; text: string; number: number };
+      lineAt: (pos: number) => { from: number; to: number; text: string; number: number };
+      lines?: number;
+      length?: number;
+    },
+    docText: string,
+    edit: EditEntry,
+    candidates: string[]
+  ): { from: number; to: number; match: string } | null {
+    if (!candidates.length) {
+      return null;
+    }
+
+    const totalLines =
+      typeof doc.lines === "number" && Number.isFinite(doc.lines)
+        ? Math.max(1, doc.lines)
+        : 1;
+
+    const safeLine = Math.min(
+      totalLines,
+      Math.max(1, Math.trunc(edit.line ?? 1))
+    );
+
+    let lineInfo: { from: number; to: number; text: string; number: number };
+    try {
+      lineInfo = doc.line(safeLine);
+    } catch {
+      return null;
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+      const localIndex = lineInfo.text.indexOf(candidate);
+      if (localIndex !== -1) {
+        return {
+          from: lineInfo.from + localIndex,
+          to: lineInfo.from + localIndex + candidate.length,
+          match: candidate
+        };
+      }
+    }
+
+    if (docText) {
+      const searchStart = lineInfo.from;
+      for (const candidate of candidates) {
+        if (!candidate) {
+          continue;
+        }
+        let globalIndex = docText.indexOf(candidate, searchStart);
+        if (globalIndex === -1) {
+          globalIndex = docText.indexOf(candidate);
+        }
+        if (globalIndex === -1) {
+          continue;
+        }
+
+        let matchLine: { from: number; to: number; number: number };
+        try {
+          matchLine = doc.lineAt(globalIndex);
+        } catch {
+          continue;
+        }
+
+        if (Math.abs(matchLine.number - lineInfo.number) > 3) {
+          continue;
+        }
+
+        return {
+          from: globalIndex,
+          to: globalIndex + candidate.length,
+          match: candidate
+        };
+      }
+    }
+
+    if (lineInfo.from < lineInfo.to) {
+      return {
+        from: lineInfo.from,
+        to: lineInfo.to,
+        match: lineInfo.text
+      };
+    }
+
+    return null;
+  }
+
+  private dispatchEditorHighlights(
+    editorView: EditorView,
+    specs: EditorHighlightSpec[]
+  ): void {
+    // Check if the editor has our field
+    let hasField = false;
+    try {
+      const field = editorView.state.field(writersRoomEditorHighlightsField, false);
+      hasField = field !== undefined;
+    } catch {
+      hasField = false;
+    }
+
+    if (!hasField) {
+      this.logWarn(
+        "Editor does not have WritersRoom highlight field. Please close and reopen this file to enable edit mode highlights."
+      );
+      return;
+    }
+
+    const signature = JSON.stringify(
+      specs.map((spec) => [
+        spec.from,
+        spec.to,
+        spec.className,
+        spec.attributes["data-writersroom-anchor"],
+        spec.attributes["data-wr-match"]
+      ])
+    );
+
+    const previous = this.editorHighlightState.get(editorView);
+    if (previous === signature) {
+      this.logInfo("Skipping duplicate highlight dispatch");
+      return;
+    }
+
+    this.editorHighlightState.set(editorView, signature);
+    
+    this.logInfo(`Dispatching ${specs.length} highlights to editor`, {
+      specs: specs.map(s => ({ 
+        from: s.from, 
+        to: s.to, 
+        className: s.className,
+        anchor: s.attributes["data-writersroom-anchor"]
+      }))
+    });
+    
+    try {
+      editorView.dispatch({
+        effects: setEditorHighlightsEffect.of(specs)
+      });
+      this.logInfo("Dispatch successful");
+    } catch (error) {
+      this.logWarn("Failed to dispatch editor highlight update.", error);
+    }
+  }
+
+  private clearEditorHighlights(): void {
+    const workspace = this.app?.workspace;
+    if (!workspace || typeof workspace.getLeavesOfType !== "function") {
+      return;
+    }
+
+    const leaves = workspace.getLeavesOfType("markdown");
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView)) {
+        continue;
+      }
+      const editorView = this.getEditorViewFromMarkdownView(view);
+      if (!editorView) {
+        continue;
+      }
+      this.editorHighlightState.delete(editorView);
+      try {
+        editorView.dispatch({
+          effects: setEditorHighlightsEffect.of([])
+        });
+      } catch (error) {
+        this.logWarn("Failed to clear editor highlights.", error);
+      }
+    }
   }
 
   private wrapBlockInElement(
@@ -971,7 +1486,7 @@ export default class WritersRoomPlugin extends Plugin {
     editIndex: number | null,
     smooth: boolean
   ): void {
-    const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
     let lineNumber = Number(target.dataset.wrLine);
 
     if (!Number.isFinite(lineNumber) && editIndex !== null && this.activePayload) {
@@ -981,13 +1496,15 @@ export default class WritersRoomPlugin extends Plugin {
       }
     }
 
-    if (editorView && Number.isFinite(lineNumber)) {
-      const leaf = editorView.leaf;
+    if (markdownView && Number.isFinite(lineNumber)) {
+      // Set the active leaf to focus the editor
+      const leaves = this.app.workspace.getLeavesOfType("markdown");
+      const leaf = leaves.find(l => l.view === markdownView);
       if (leaf && typeof this.app.workspace.setActiveLeaf === "function") {
         this.app.workspace.setActiveLeaf(leaf, { focus: true });
       }
 
-      const editorAny = editorView.editor as unknown as {
+      const editorAny = markdownView.editor as unknown as {
         getLine?: (line: number) => string;
         scrollIntoView?: (
           range: { from: { line: number; ch: number }; to: { line: number; ch: number } },
@@ -1057,7 +1574,7 @@ export default class WritersRoomPlugin extends Plugin {
       const position = { line: editorLine, ch: Math.max(0, column) };
 
       try {
-        editorView.editor.setCursor(position);
+        markdownView.editor.setCursor(position);
 
         if (typeof editorAny.scrollIntoView === "function") {
           editorAny.scrollIntoView({ from: position, to: position }, true);
@@ -1098,6 +1615,7 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     this.scrollPreviewAnchor(anchorId, target, smooth);
+    this.refreshEditorHighlights();
   }
 
   private scrollPreviewAnchor(
@@ -1578,6 +2096,7 @@ export default class WritersRoomPlugin extends Plugin {
       });
 
       this.sidebarView.updateSelection(this.activeAnchorId);
+      this.refreshEditorHighlights();
     } catch (error) {
       this.logError("Failed to refresh Writers Room sidebar.", error);
     }
@@ -1702,197 +2221,7 @@ export default class WritersRoomPlugin extends Plugin {
 
     const style = document.createElement("style");
     style.setAttribute("data-writersroom-style", "true");
-    style.textContent = `
-      .writersroom-highlight {
-        background-color: rgba(255, 235, 59, 0.35);
-        border-bottom: 2px solid rgba(255, 193, 7, 0.6);
-        border-radius: 2px;
-        padding: 0 0.1em;
-        cursor: pointer;
-        transition: box-shadow 0.2s ease, background-color 0.2s ease;
-      }
-
-      .writersroom-highlight[data-wr-type="addition"] {
-        background-color: rgba(76, 175, 80, 0.25);
-        border-bottom-color: rgba(76, 175, 80, 0.55);
-      }
-
-      .writersroom-highlight[data-wr-type="subtraction"] {
-        background-color: rgba(244, 67, 54, 0.2);
-        border-bottom-color: rgba(244, 67, 54, 0.5);
-      }
-
-      .writersroom-highlight[data-wr-type="annotation"] {
-        background-color: rgba(63, 81, 181, 0.2);
-        border-bottom-color: rgba(63, 81, 181, 0.45);
-      }
-
-      .writersroom-highlight:focus {
-        outline: none;
-        box-shadow: 0 0 0 2px rgba(255, 193, 7, 0.45);
-      }
-
-      .writersroom-highlight-active {
-        box-shadow: 0 0 0 2px rgba(255, 193, 7, 0.75),
-          inset 0 0 0 1px rgba(255, 255, 255, 0.6);
-      }
-
-      .writersroom-highlight-block {
-        display: block;
-        width: 100%;
-        box-sizing: border-box;
-        margin: 0.1rem 0;
-        padding: 0.05rem 0.1rem;
-      }
-
-      .writersroom-sidebar {
-        display: flex;
-        flex-direction: column;
-        height: 100%;
-      }
-
-      .writersroom-sidebar-header {
-        padding: 0.75rem 0.9rem 0.5rem;
-        border-bottom: 1px solid var(--divider-color);
-      }
-
-      .writersroom-sidebar-header-top {
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 0.5rem;
-      }
-
-      .writersroom-sidebar-title {
-        font-weight: 600;
-          margin-bottom: 0;
-      }
-
-      .writersroom-sidebar-button {
-        background-color: var(--interactive-accent);
-        color: var(--text-on-accent, #fff);
-        border: none;
-        border-radius: 4px;
-        padding: 0.35rem 0.75rem;
-        font-size: 0.8em;
-        font-weight: 500;
-        cursor: pointer;
-        transition: opacity 0.2s ease;
-      }
-
-      .writersroom-sidebar-button:hover:not(:disabled) {
-        opacity: 0.85;
-      }
-
-      .writersroom-sidebar-button:disabled {
-        opacity: 0.55;
-        cursor: default;
-      }
-
-      .writersroom-sidebar-summary {
-        font-size: 0.85em;
-        color: var(--text-muted);
-        white-space: pre-wrap;
-      }
-
-      .writersroom-sidebar-list {
-        flex: 1;
-        overflow-y: auto;
-        padding: 0.4rem 0;
-      }
-
-      .writersroom-sidebar-item {
-        display: flex;
-        gap: 0.75rem;
-        align-items: flex-start;
-        padding: 0.55rem 0.9rem;
-        border-left: 3px solid transparent;
-        cursor: pointer;
-        transition: background-color 0.2s ease, border-color 0.2s ease;
-      }
-
-      .writersroom-sidebar-item-icon {
-        flex: 0 0 auto;
-        font-size: 1.1em;
-        line-height: 1;
-        margin-top: 0.15rem;
-      }
-
-      .writersroom-sidebar-item-content {
-        flex: 1 1 auto;
-        min-width: 0;
-      }
-
-      .writersroom-sidebar-item:hover {
-        background-color: var(--background-modifier-hover);
-      }
-
-      .writersroom-sidebar-item.is-selected {
-        border-left-color: var(--interactive-accent);
-        background-color: var(--background-modifier-hover);
-      }
-
-      .writersroom-sidebar-item-heading {
-        font-weight: 500;
-        margin-bottom: 0.25rem;
-      }
-
-      .writersroom-sidebar-item-meta {
-        font-size: 0.75em;
-        color: var(--text-muted);
-        margin-bottom: 0.35rem;
-        text-transform: capitalize;
-      }
-
-      .writersroom-sidebar-item-original {
-        font-size: 0.8em;
-        color: var(--text-muted);
-        white-space: pre-wrap;
-        margin-bottom: 0.35rem;
-      }
-
-      .writersroom-sidebar-item-snippet {
-        font-size: 0.85em;
-        color: var(--text-normal);
-        white-space: pre-wrap;
-        margin-top: 0.25rem;
-      }
-
-      .writersroom-sidebar-item-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.35rem;
-        margin-top: 0.45rem;
-        pointer-events: auto;
-      }
-
-      .writersroom-sidebar-action-btn {
-        background: var(--interactive-accent);
-        color: var(--text-on-accent, #fff);
-        border: none;
-        border-radius: 4px;
-        padding: 0.25rem 0.6rem;
-        font-size: 0.75em;
-        font-weight: 500;
-        cursor: pointer;
-        transition: opacity 0.2s ease;
-      }
-
-      .writersroom-sidebar-action-btn:hover:not(:disabled) {
-        opacity: 0.85;
-      }
-
-      .writersroom-sidebar-action-btn:disabled {
-        opacity: 0.55;
-        cursor: default;
-      }
-
-      .writersroom-sidebar-empty {
-        padding: 1rem 0.9rem;
-        color: var(--text-muted);
-      }
-    `;
-
+    style.textContent = buildWritersRoomCss();
     document.head.appendChild(style);
     this.styleEl = style;
   }
@@ -1953,6 +2282,8 @@ export default class WritersRoomPlugin extends Plugin {
           entry.hash = this.computePayloadHash(entry.payload);
           if (this.activeSourcePath === sourcePath) {
             this.activePayload = entry.payload;
+            void this.refreshSidebarForActiveFile();
+            this.refreshEditorHighlights();
           }
           this.persistStateSafely();
         }
@@ -2112,6 +2443,232 @@ export default class WritersRoomPlugin extends Plugin {
     await this.persistState();
     this.sidebarView?.setRequestState(this.requestInProgress);
   }
+}
+
+export function buildWritersRoomCss(): string {
+  return `
+      /* Line-level highlight styles */
+      .cm-line.writersroom-highlight {
+        background-color: rgba(255, 235, 59, 0.15);
+        cursor: pointer;
+        transition: background-color 0.2s ease;
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="addition"] {
+        background-color: rgba(76, 175, 80, 0.15);
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="subtraction"] {
+        background-color: rgba(244, 67, 54, 0.12);
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="annotation"] {
+        background-color: rgba(63, 81, 181, 0.12);
+      }
+
+      .cm-line.writersroom-highlight:hover {
+        background-color: rgba(255, 193, 7, 0.25);
+      }
+
+      .cm-line.writersroom-highlight-active {
+        background-color: rgba(255, 193, 7, 0.3);
+        border-left: 3px solid rgba(255, 193, 7, 0.8);
+        padding-left: 4px;
+      }
+
+      /* Preview mode highlights (keep existing) */
+      .writersroom-highlight,
+      span.writersroom-highlight {
+        background-color: rgba(255, 235, 59, 0.2);
+        cursor: pointer;
+        transition: background-color 0.2s ease;
+        text-decoration: inherit;
+        display: inline;
+      }
+
+      .writersroom-highlight[data-wr-type="addition"],
+      span.writersroom-highlight[data-wr-type="addition"] {
+        background-color: rgba(76, 175, 80, 0.2);
+      }
+
+      .writersroom-highlight[data-wr-type="subtraction"],
+      span.writersroom-highlight[data-wr-type="subtraction"] {
+        background-color: rgba(244, 67, 54, 0.15);
+      }
+
+      .writersroom-highlight[data-wr-type="annotation"],
+      span.writersroom-highlight[data-wr-type="annotation"] {
+        background-color: rgba(63, 81, 181, 0.15);
+      }
+
+      .writersroom-highlight:hover,
+      span.writersroom-highlight:hover {
+        background-color: rgba(255, 193, 7, 0.3);
+      }
+
+      .writersroom-highlight-active,
+      span.writersroom-highlight-active {
+        background-color: rgba(255, 193, 7, 0.35);
+        outline: 2px solid rgba(255, 193, 7, 0.6);
+        outline-offset: -2px;
+      }
+
+      .writersroom-highlight-block,
+      span.writersroom-highlight-block {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0.1rem 0;
+        padding: 0.05rem 0.1rem;
+      }
+
+      .writersroom-sidebar {
+        display: flex;
+        flex-direction: column;
+        height: 100%;
+      }
+
+      .writersroom-sidebar-header {
+        padding: 0.75rem 0.9rem 0.5rem;
+        border-bottom: 1px solid var(--divider-color);
+      }
+
+      .writersroom-sidebar-header-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+
+      .writersroom-sidebar-title {
+        font-weight: 600;
+        margin-bottom: 0;
+      }
+
+      .writersroom-sidebar-button {
+        background-color: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        border: none;
+        border-radius: 4px;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.8em;
+        font-weight: 500;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+
+      .writersroom-sidebar-button:hover:not(:disabled) {
+        opacity: 0.85;
+      }
+
+      .writersroom-sidebar-button:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .writersroom-sidebar-summary {
+        font-size: 0.85em;
+        color: var(--text-muted);
+        white-space: pre-wrap;
+      }
+
+      .writersroom-sidebar-list {
+        flex: 1;
+        overflow-y: auto;
+        padding: 0.4rem 0;
+      }
+
+      .writersroom-sidebar-item {
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-start;
+        padding: 0.55rem 0.9rem;
+        border-left: 3px solid transparent;
+        cursor: pointer;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
+      }
+
+      .writersroom-sidebar-item-icon {
+        flex: 0 0 auto;
+        font-size: 1.1em;
+        line-height: 1;
+        margin-top: 0.15rem;
+      }
+
+      .writersroom-sidebar-item-content {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .writersroom-sidebar-item:hover {
+        background-color: var(--background-modifier-hover);
+      }
+
+      .writersroom-sidebar-item.is-selected {
+        border-left-color: var(--interactive-accent);
+        background-color: var(--background-modifier-hover);
+      }
+
+      .writersroom-sidebar-item-heading {
+        font-weight: 500;
+        margin-bottom: 0.25rem;
+      }
+
+      .writersroom-sidebar-item-meta {
+        font-size: 0.75em;
+        color: var(--text-muted);
+        margin-bottom: 0.35rem;
+        text-transform: capitalize;
+      }
+
+      .writersroom-sidebar-item-original {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        white-space: pre-wrap;
+        margin-bottom: 0.35rem;
+      }
+
+      .writersroom-sidebar-item-snippet {
+        font-size: 0.85em;
+        color: var(--text-normal);
+        white-space: pre-wrap;
+        margin-top: 0.25rem;
+      }
+
+      .writersroom-sidebar-item-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.45rem;
+        pointer-events: auto;
+      }
+
+      .writersroom-sidebar-action-btn {
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        border: none;
+        border-radius: 4px;
+        padding: 0.25rem 0.6rem;
+        font-size: 0.75em;
+        font-weight: 500;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+
+      .writersroom-sidebar-action-btn:hover:not(:disabled) {
+        opacity: 0.85;
+      }
+
+      .writersroom-sidebar-action-btn:disabled {
+        opacity: 0.55;
+        cursor: default;
+      }
+
+      .writersroom-sidebar-empty {
+        padding: 1rem 0.9rem;
+        color: var(--text-muted);
+      }
+    `;
 }
 
 class WritersRoomSidebarView extends ItemView {
@@ -2329,10 +2886,10 @@ class WritersRoomSidebarView extends ItemView {
       return;
     }
 
-      const actionsEl = container.createDiv({
-        cls: "writersroom-sidebar-item-actions"
-      });
-      actionsEl.style.pointerEvents = "auto";
+    const actionsEl = container.createDiv({
+      cls: "writersroom-sidebar-item-actions"
+    });
+    actionsEl.style.pointerEvents = "auto";
 
     for (const action of actions) {
       const buttonEl = actionsEl.createEl("button", {
