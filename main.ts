@@ -62,11 +62,19 @@ interface SidebarState {
   selectedAnchorId?: string | null;
 }
 
+interface SidebarAction {
+  label: string;
+  title?: string;
+  onClick: () => void | Promise<void>;
+  disabled?: boolean;
+}
+
 type SelectionOrigin = "highlight" | "sidebar" | "external";
 
 interface HighlightActivationOptions {
   scroll?: boolean;
   attempts?: number;
+  line?: number;
 }
 
 interface WritersRoomSettings {
@@ -736,6 +744,16 @@ export default class WritersRoomPlugin extends Plugin {
     await this.selectEdit(sourcePath, anchorId, "sidebar");
   }
 
+  async jumpToAnchor(sourcePath: string, anchorId: string): Promise<void> {
+    const info = this.parseAnchorId(anchorId);
+    if (info) {
+      this.focusEditorCursor(info.line);
+      this.scrollPreviewAnchor(anchorId);
+    }
+
+    await this.selectEdit(sourcePath, anchorId, "sidebar");
+  }
+
   private async selectEdit(
     sourcePath: string,
     anchorId: string,
@@ -765,6 +783,11 @@ export default class WritersRoomPlugin extends Plugin {
     this.activeSourcePath = sourcePath;
     this.activeAnchorId = anchorId;
 
+    const anchorInfo = this.parseAnchorId(anchorId);
+    if (origin !== "highlight" && anchorInfo) {
+      this.focusEditorCursor(anchorInfo.line);
+    }
+
     const view = await this.ensureSidebar({
       sourcePath,
       payload,
@@ -776,7 +799,8 @@ export default class WritersRoomPlugin extends Plugin {
     const shouldScroll = origin !== "highlight";
     this.setActiveHighlight(anchorId, {
       scroll: shouldScroll,
-      attempts: 0
+      attempts: 0,
+      line: anchorInfo?.line
     });
   }
 
@@ -829,12 +853,19 @@ export default class WritersRoomPlugin extends Plugin {
     ) as HTMLElement | null;
 
     if (!target) {
+      if (options?.scroll) {
+        this.scrollPreviewAnchor(anchorId);
+      }
+      if (options?.scroll && typeof options.line === "number") {
+        this.focusEditorCursor(options.line);
+      }
       const attempts = options?.attempts ?? 0;
       if (attempts < 5 && typeof window !== "undefined") {
         this.highlightRetryHandle = window.setTimeout(() => {
           this.setActiveHighlight(anchorId, {
             scroll: options?.scroll,
-            attempts: attempts + 1
+            attempts: attempts + 1,
+            line: options?.line
           });
         }, 180);
       }
@@ -844,7 +875,7 @@ export default class WritersRoomPlugin extends Plugin {
     target.classList.add("writersroom-highlight-active");
 
     if (options?.scroll) {
-      this.scrollEditorsToAnchor(target, anchorId);
+      this.scrollEditorsToAnchor(target, anchorId, options?.line);
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
@@ -855,49 +886,144 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private scrollEditorsToAnchor(target: HTMLElement, anchorId: string): void {
-    const lineAttr = target.dataset.wrLine;
-    const indexAttr = target.dataset.wrIndex;
-
-    const lineNumber = lineAttr ? Number(lineAttr) : NaN;
-    const editIndex = indexAttr ? Number(indexAttr) : NaN;
-
+  private focusEditorCursor(lineNumber: number, attempt = 0): void {
     if (!Number.isFinite(lineNumber)) {
       return;
     }
 
     const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
     if (!editorView) {
+      if (attempt < 5 && typeof window !== "undefined") {
+        window.setTimeout(() => this.focusEditorCursor(lineNumber, attempt + 1), 160);
+      }
       return;
     }
 
-    const editor = editorView.editor;
-    const line = Math.max(0, Math.floor(lineNumber - 1));
+    const editorLine = Math.max(0, Math.floor(lineNumber - 1));
+    const position = { line: editorLine, ch: 0 } as const;
 
     try {
-      if (editor.scrollIntoView) {
-        editor.scrollIntoView({ from: { line, ch: 0 }, to: { line, ch: 0 } }, true);
+      const editorAny = editorView.editor as unknown as {
+        scrollIntoView?: (range: { from: typeof position; to: typeof position }, center?: boolean) => void;
+        focus?: () => void;
+      };
+
+      if (typeof editorAny.scrollIntoView === "function") {
+        editorAny.scrollIntoView({ from: position, to: position }, true);
       }
-      editor.setCursor({ line, ch: 0 });
+
+      editorView.editor.setCursor(position);
+
+      if (typeof editorAny.focus === "function") {
+        editorAny.focus();
+      }
     } catch (error) {
-      this.logWarn("Failed to move editor cursor to highlight.", {
-        anchorId,
+      this.logWarn("Failed to focus editor on requested line.", {
+        line: lineNumber,
         error
       });
     }
+  }
 
-    const preview = editorView.previewMode?.containerEl;
-    if (!preview) {
+  private scrollEditorsToAnchor(
+    target: HTMLElement,
+    anchorId: string,
+    fallbackLine?: number
+  ): void {
+    const lineAttr = target.dataset.wrLine;
+    const lineNumber = lineAttr ? Number(lineAttr) : fallbackLine ?? NaN;
+
+    if (Number.isFinite(lineNumber)) {
+      this.focusEditorCursor(lineNumber as number);
+    }
+
+    this.scrollPreviewAnchor(anchorId, target);
+  }
+
+  private scrollPreviewAnchor(
+    anchorId: string,
+    existingTarget?: HTMLElement | null
+  ): void {
+    if (!anchorId || typeof document === "undefined") {
       return;
     }
 
-    const previewAnchor = preview.querySelector<HTMLElement>(
-      `[data-writersroom-anchor="${anchorId}"]`
-    );
+    const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    const previewContainer = activeView?.previewMode?.containerEl ?? null;
+    const selector = `[data-writersroom-anchor="${anchorId}"]`;
 
-    if (previewAnchor) {
-      previewAnchor.scrollIntoView({ behavior: "smooth", block: "center" });
+    let target = existingTarget ?? null;
+
+    if (!target && previewContainer) {
+      target = (previewContainer.querySelector(selector) as HTMLElement | null) ??
+        (previewContainer.querySelector(`#${anchorId}`) as HTMLElement | null);
     }
+
+    if (!target) {
+      target = (document.querySelector(selector) as HTMLElement | null) ??
+        (document.getElementById(anchorId) as HTMLElement | null);
+    }
+
+    if (!target) {
+      return;
+    }
+
+    const scrollContainer = this.findScrollableAncestor(target, previewContainer);
+
+    if (scrollContainer) {
+      const containerRect = scrollContainer.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const offset = targetRect.top - containerRect.top - containerRect.height / 2;
+
+      if (typeof scrollContainer.scrollBy === "function") {
+        scrollContainer.scrollBy({ top: offset, left: 0, behavior: "smooth" });
+      } else if (typeof scrollContainer.scrollTo === "function") {
+        scrollContainer.scrollTo({
+          top: scrollContainer.scrollTop + offset,
+          left: scrollContainer.scrollLeft,
+          behavior: "smooth"
+        });
+      } else {
+        scrollContainer.scrollTop += offset;
+      }
+
+      return;
+    }
+
+    if (typeof target.scrollIntoView === "function") {
+      target.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
+  private findScrollableAncestor(
+    target: HTMLElement,
+    boundary?: HTMLElement | null
+  ): HTMLElement | null {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    let current: HTMLElement | null = target.parentElement;
+    while (current) {
+      if (boundary && !boundary.contains(current)) {
+        break;
+      }
+
+      const style = window.getComputedStyle(current);
+      const overflowY = style.overflowY;
+
+      if ((overflowY === "auto" || overflowY === "scroll") && current.scrollHeight > current.clientHeight) {
+        return current;
+      }
+
+      if (current === boundary) {
+        break;
+      }
+
+      current = current.parentElement;
+    }
+
+    return null;
   }
 
   private clearHighlightRetry(): void {
@@ -1390,6 +1516,22 @@ export default class WritersRoomPlugin extends Plugin {
     return `writersroom-line-${line}-edit-${index}`;
   }
 
+  private parseAnchorId(anchorId: string): { line: number; index: number } | null {
+    const match = anchorId.match(/^writersroom-line-(\d+)-edit-(\d+)$/);
+    if (!match) {
+      return null;
+    }
+
+    const line = Number(match[1]);
+    const index = Number(match[2]);
+
+    if (!Number.isFinite(line) || !Number.isFinite(index)) {
+      return null;
+    }
+
+    return { line, index };
+  }
+
   private injectStyles(): void {
     if (this.styleEl || typeof document === "undefined") {
       return;
@@ -1528,6 +1670,35 @@ export default class WritersRoomPlugin extends Plugin {
         font-size: 0.85em;
         color: var(--text-normal);
         white-space: pre-wrap;
+      }
+
+      .writersroom-sidebar-item-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.45rem;
+        pointer-events: auto;
+      }
+
+      .writersroom-sidebar-action-btn {
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        border: none;
+        border-radius: 4px;
+        padding: 0.25rem 0.6rem;
+        font-size: 0.75em;
+        font-weight: 500;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+
+      .writersroom-sidebar-action-btn:hover:not(:disabled) {
+        opacity: 0.85;
+      }
+
+      .writersroom-sidebar-action-btn:disabled {
+        opacity: 0.55;
+        cursor: default;
       }
 
       .writersroom-sidebar-empty {
@@ -1905,6 +2076,18 @@ class WritersRoomSidebarView extends ItemView {
         text: snippet
       });
 
+      const actions: SidebarAction[] = [];
+      if (this.state.sourcePath) {
+        actions.push({
+          label: "Jump to",
+          title: "Scroll note to this edit",
+          onClick: () =>
+            this.plugin.jumpToAnchor(this.state.sourcePath as string, anchorId)
+        });
+      }
+
+      this.renderActions(itemEl, actions);
+
       itemEl.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1919,6 +2102,46 @@ class WritersRoomSidebarView extends ItemView {
     });
 
     this.applySelection();
+  }
+
+  private renderActions(container: HTMLElement, actions: SidebarAction[]): void {
+    if (!actions.length) {
+      return;
+    }
+
+      const actionsEl = container.createDiv({
+        cls: "writersroom-sidebar-item-actions"
+      });
+      actionsEl.style.pointerEvents = "auto";
+
+    for (const action of actions) {
+      const buttonEl = actionsEl.createEl("button", {
+        cls: "writersroom-sidebar-action-btn",
+        text: action.label
+      });
+
+      if (action.title) {
+        buttonEl.setAttribute("title", action.title);
+      }
+
+      if (action.disabled) {
+        buttonEl.setAttribute("disabled", "true");
+      }
+
+      buttonEl.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (action.disabled) {
+          return;
+        }
+        const result = action.onClick();
+        if (result instanceof Promise) {
+          void result.catch((error) => {
+            console.warn("[WritersRoom] Sidebar action rejected.", error);
+          });
+        }
+      });
+    }
   }
 
   private applySelection(): void {
