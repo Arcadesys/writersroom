@@ -2,6 +2,7 @@ import {
   App,
   MarkdownPostProcessorContext,
   ItemView,
+  MarkdownView,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -17,6 +18,7 @@ import {
   EditEntry,
   EditPayload,
   ValidationError,
+  parseEditPayload,
   parseEditPayloadFromString
 } from "./editParser";
 
@@ -127,6 +129,21 @@ export default class WritersRoomPlugin extends Plugin {
       name: "Open Writers Room sidebar",
       callback: async () => {
         await this.openSidebarForActiveFile();
+      }
+    });
+
+    this.addCommand({
+      id: "writers-room-request-ai-edits",
+      name: "Ask the Writers for edits",
+      checkCallback: (checking) => {
+        const file = this.app.workspace.getActiveFile();
+        if (!file) {
+          return false;
+        }
+        if (!checking) {
+          void this.requestAiEditsForActiveFile("external");
+        }
+        return true;
       }
     });
   }
@@ -281,19 +298,37 @@ export default class WritersRoomPlugin extends Plugin {
 
       const targets = [item.edit.original_text];
       const trimmed = item.edit.original_text.trim();
-      if (trimmed.length > 0 && trimmed !== item.edit.original_text) {
-        targets.push(trimmed);
-      }
+      const targetValues = new Set<string>();
+      const addTargets = (value: string | null | undefined) => {
+        if (typeof value !== "string") {
+          return;
+        }
+        const variants = [value, value.trim()];
+        for (const variant of variants) {
+          if (!variant) {
+            continue;
+          }
+          targetValues.add(variant);
+          const collapsed = variant.replace(/\s+/g, " ");
+          if (collapsed && collapsed !== variant) {
+            targetValues.add(collapsed);
+          }
+        }
+      };
+
+      addTargets(item.edit.original_text);
+      addTargets(typeof item.edit.output === "string" ? item.edit.output : null);
 
       let anchorEl: HTMLElement | null = null;
-      for (const needle of targets) {
-        if (!needle) {
-          continue;
-        }
+      for (const needle of targetValues) {
         anchorEl = this.wrapMatchInElement(element, needle, options);
         if (anchorEl) {
           break;
         }
+      }
+
+      if (!anchorEl) {
+        anchorEl = this.wrapBlockInElement(element, options);
       }
 
       if (anchorEl) {
@@ -322,11 +357,12 @@ export default class WritersRoomPlugin extends Plugin {
           });
         }
       } else {
-        console.debug(
-          `[WritersRoom] Unable to highlight text for edit at line ${
-            item.edit.line
-          } in ${context.sourcePath}.`
-        );
+        this.logWarn("Unable to highlight text for edit.", {
+          line: item.edit.line,
+          type: item.edit.type,
+          sourcePath: context.sourcePath,
+          candidates: Array.from(targetValues).slice(0, 4)
+        });
       }
     }
   }
@@ -340,57 +376,154 @@ export default class WritersRoomPlugin extends Plugin {
       return null;
     }
 
-    if (options.id && element.querySelector(`#${options.id}`)) {
-      return element.querySelector(`#${options.id}`) as HTMLElement;
+    if (options.id) {
+      const existing = element.querySelector(`#${options.id}`);
+      if (existing instanceof HTMLElement) {
+        return existing;
+      }
     }
 
     const doc = element.ownerDocument ?? document;
     const walker = doc.createTreeWalker(element, NodeFilter.SHOW_TEXT);
-    let currentNode = walker.nextNode();
+    const textNodes: Array<{ node: Text; start: number; length: number }> = [];
+    let aggregate = "";
+    let offset = 0;
 
-    while (currentNode) {
-      const textNode = currentNode as Text;
-      const value = textNode.nodeValue;
-
-      if (value) {
-        const matchIndex = value.indexOf(needle);
-        if (matchIndex !== -1) {
-          const target =
-            matchIndex === 0 ? textNode : textNode.splitText(matchIndex);
-          target.splitText(needle.length);
-
-          const wrapper = doc.createElement("span");
-          wrapper.id = options.id;
-          wrapper.tabIndex = -1;
-          wrapper.setAttribute("data-writersroom-anchor", options.id);
-
-          if (options.title) {
-            wrapper.setAttribute("title", options.title);
-          }
-
-          for (const cls of options.classes) {
-            wrapper.classList.add(cls);
-          }
-
-          for (const [key, value] of Object.entries(options.dataAttrs)) {
-            wrapper.dataset[key] = value;
-          }
-
-          const parent = target.parentNode;
-          if (parent) {
-            parent.replaceChild(wrapper, target);
-            wrapper.appendChild(target);
-            return wrapper;
-          }
-
-          return null;
-        }
+    let current: Node | null = walker.nextNode();
+    while (current) {
+      const textNode = current as Text;
+      const value = textNode.nodeValue ?? "";
+      if (value.length > 0) {
+        textNodes.push({ node: textNode, start: offset, length: value.length });
+        aggregate += value;
+        offset += value.length;
       }
-
-      currentNode = walker.nextNode();
+      current = walker.nextNode();
     }
 
-    return null;
+    if (!aggregate) {
+      return null;
+    }
+
+    const matchIndex = aggregate.indexOf(needle);
+    if (matchIndex === -1) {
+      return null;
+    }
+
+    const matchEnd = matchIndex + needle.length;
+    let startNode: Text | null = null;
+    let startOffset = 0;
+    let endNode: Text | null = null;
+    let endOffset = 0;
+
+    for (const entry of textNodes) {
+      const nodeStart = entry.start;
+      const nodeEnd = nodeStart + entry.length;
+
+      if (!startNode && matchIndex >= nodeStart && matchIndex < nodeEnd) {
+        startNode = entry.node;
+        startOffset = matchIndex - nodeStart;
+      }
+
+      if (!endNode && matchEnd > nodeStart && matchEnd <= nodeEnd) {
+        endNode = entry.node;
+        endOffset = matchEnd - nodeStart;
+        break;
+      }
+    }
+
+    if (!startNode || !endNode) {
+      return null;
+    }
+
+    const range = doc.createRange();
+    try {
+      range.setStart(startNode, startOffset);
+      range.setEnd(endNode, endOffset);
+    } catch {
+      range.detach?.();
+      return null;
+    }
+
+    const wrapper = doc.createElement("span");
+    wrapper.id = options.id;
+    wrapper.tabIndex = -1;
+    wrapper.setAttribute("data-writersroom-anchor", options.id);
+
+    if (options.title) {
+      wrapper.setAttribute("title", options.title);
+    }
+
+    for (const cls of options.classes) {
+      wrapper.classList.add(cls);
+    }
+
+    for (const [key, value] of Object.entries(options.dataAttrs)) {
+      wrapper.dataset[key] = value;
+    }
+
+    try {
+      range.surroundContents(wrapper);
+    } catch (error) {
+      this.logWarn("Failed to surround text for highlight.", {
+        needle,
+        error
+      });
+      range.detach?.();
+      return null;
+    }
+
+    range.detach?.();
+    return wrapper;
+  }
+
+  private wrapBlockInElement(
+    element: HTMLElement,
+    options: HighlightOptions
+  ): HTMLElement | null {
+    if (!element.firstChild) {
+      return null;
+    }
+
+    if (options.id) {
+      const existing = element.querySelector(`#${options.id}`);
+      if (existing instanceof HTMLElement) {
+        return existing;
+      }
+    }
+
+    const doc = element.ownerDocument ?? document;
+    const range = doc.createRange();
+    range.selectNodeContents(element);
+
+    const wrapper = doc.createElement("span");
+    wrapper.id = options.id;
+    wrapper.tabIndex = -1;
+    wrapper.setAttribute("data-writersroom-anchor", options.id);
+    wrapper.classList.add("writersroom-highlight-block");
+
+    if (options.title) {
+      wrapper.setAttribute("title", options.title);
+    }
+
+    for (const cls of options.classes) {
+      wrapper.classList.add(cls);
+    }
+
+    for (const [key, value] of Object.entries(options.dataAttrs)) {
+      wrapper.dataset[key] = value;
+    }
+
+    try {
+      range.surroundContents(wrapper);
+    } catch (error) {
+      this.logWarn("Failed to apply block-level highlight wrapper.", error);
+      range.detach?.();
+      return null;
+    }
+
+    range.detach?.();
+    return wrapper;
   }
 
   private async handleAnchorClick(
@@ -515,6 +648,7 @@ export default class WritersRoomPlugin extends Plugin {
     target.classList.add("writersroom-highlight-active");
 
     if (options?.scroll) {
+      this.scrollEditorsToAnchor(target, anchorId);
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
@@ -525,11 +659,408 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
+  private scrollEditorsToAnchor(target: HTMLElement, anchorId: string): void {
+    const lineAttr = target.dataset.wrLine;
+    const indexAttr = target.dataset.wrIndex;
+
+    const lineNumber = lineAttr ? Number(lineAttr) : NaN;
+    const editIndex = indexAttr ? Number(indexAttr) : NaN;
+
+    if (!Number.isFinite(lineNumber)) {
+      return;
+    }
+
+    const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!editorView) {
+      return;
+    }
+
+    const editor = editorView.editor;
+    const line = Math.max(0, Math.floor(lineNumber - 1));
+
+    try {
+      if (editor.scrollIntoView) {
+        editor.scrollIntoView({ from: { line, ch: 0 }, to: { line, ch: 0 } }, true);
+      }
+      editor.setCursor({ line, ch: 0 });
+    } catch (error) {
+      this.logWarn("Failed to move editor cursor to highlight.", {
+        anchorId,
+        error
+      });
+    }
+
+    const preview = editorView.previewMode?.containerEl;
+    if (!preview) {
+      return;
+    }
+
+    const previewAnchor = preview.querySelector<HTMLElement>(
+      `[data-writersroom-anchor="${anchorId}"]`
+    );
+
+    if (previewAnchor) {
+      previewAnchor.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }
+
   private clearHighlightRetry(): void {
     if (this.highlightRetryHandle !== null && typeof window !== "undefined") {
       window.clearTimeout(this.highlightRetryHandle);
       this.highlightRetryHandle = null;
     }
+  }
+
+  async requestAiEditsForActiveFile(
+    origin: SelectionOrigin,
+    sourcePath?: string
+  ): Promise<void> {
+    const targetFile = sourcePath
+      ? this.getFileByPath(sourcePath)
+      : this.app.workspace.getActiveFile();
+
+    if (!targetFile) {
+      new Notice("Open a note before asking the Writers for edits.");
+      return;
+    }
+
+    await this.requestAiEditsForFile(targetFile, origin);
+  }
+
+  private getFileByPath(path: string): TFile | null {
+    const abstract = this.getVault().getAbstractFileByPath(path);
+    return this.isTFile(abstract) ? abstract : null;
+  }
+
+  private setRequestState(requesting: boolean): void {
+    if (this.requestInProgress === requesting) {
+      return;
+    }
+
+    this.requestInProgress = requesting;
+    this.sidebarView?.setRequestState(requesting);
+  }
+
+  private async requestAiEditsForFile(
+    file: TFile,
+    origin: SelectionOrigin
+  ): Promise<void> {
+    if (this.requestInProgress) {
+      new Notice("Already asking the Writers. Please wait.");
+      return;
+    }
+
+    const apiKey = this.settings.apiKey.trim();
+    if (!apiKey) {
+      new Notice("Add your OpenAI API key in Writers Room settings first.");
+      return;
+    }
+
+    const editsPath = this.getEditsPathForSource(file.path);
+    if (!editsPath) {
+      new Notice("Could not determine where to store Writers Room edits for this note.");
+      return;
+    }
+
+    let noteContents: string;
+    try {
+      noteContents = await this.getVault().read(file);
+    } catch (error) {
+      this.logError("Failed to read note before requesting AI edits.", error);
+      new Notice("Failed to read the note contents. See console for details.");
+      return;
+    }
+
+    if (!noteContents.trim()) {
+      new Notice("The current note is empty. Add some content before asking the Writers.");
+      return;
+    }
+
+    this.setRequestState(true);
+    const loadingNotice = new Notice("Asking the Writers…", 0);
+
+    try {
+      const instructions =
+        "You are the Writers Room editorial board. Review the markdown document provided and return a JSON object with a 'summary' and an 'edits' array. " +
+        "Each edit must include agent 'editor', a 1-based line number, type of 'addition', 'subtraction', or 'annotation', category of 'flow', 'rhythm', 'sensory', or 'punch', the original_text from the source, and output which may be a revised string or null for annotations. " +
+        "Respond with valid JSON only. Do not include commentary outside the JSON object.";
+
+      const userPrompt = `Title: ${file.basename}\n\nMarkdown:\n\n${noteContents}`;
+
+      const fetchImpl: typeof fetch | null =
+        typeof fetch !== "undefined"
+          ? fetch
+          : typeof window !== "undefined" && typeof window.fetch === "function"
+            ? window.fetch.bind(window)
+            : null;
+
+      if (!fetchImpl) {
+        throw new Error("Fetch API is unavailable in this environment.");
+      }
+
+      const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: "gpt-4o-mini",
+          temperature: 0.3,
+          messages: [
+            { role: "system", content: instructions },
+            { role: "user", content: userPrompt }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
+      }
+
+      const json = await response.json() as {
+        choices?: Array<{
+          message?: { content?: string | Array<{ text?: string }> };
+        }>;
+      };
+
+      let completion = json.choices?.[0]?.message?.content ?? "";
+
+      if (Array.isArray(completion)) {
+        completion = completion
+          .map((part: unknown) => {
+            if (typeof part === "string") {
+              return part;
+            }
+            if (part && typeof part === "object" && "text" in part) {
+              const value = (part as { text?: string }).text;
+              return typeof value === "string" ? value : "";
+            }
+            return "";
+          })
+          .join("\n");
+      }
+
+      if (typeof completion !== "string" || completion.trim().length === 0) {
+        throw new Error("OpenAI response did not include text content.");
+      }
+
+      const jsonText = this.extractJsonFromResponse(completion);
+      if (!jsonText) {
+        throw new Error("OpenAI response did not include a JSON payload.");
+      }
+
+  const payload = this.parseAiPayload(jsonText);
+
+      await this.ensureFolder("edits");
+      await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
+
+      this.editCache.set(file.path, payload);
+      this.editCachePromises.delete(file.path);
+      this.activeSourcePath = file.path;
+
+      this.logInfo("Writers Room edits generated.", {
+        file: file.path,
+        edits: payload.edits.length
+      });
+
+      if (payload.edits.length > 0) {
+        const firstAnchor = this.buildAnchorId(payload.edits[0].line, 0);
+        await this.selectEdit(file.path, firstAnchor, origin);
+        new Notice(`Writers provided ${payload.edits.length} edit${payload.edits.length === 1 ? "" : "s"}.`);
+      } else {
+        await this.refreshSidebarForActiveFile();
+        new Notice("Writers responded without specific edits.");
+      }
+    } catch (error) {
+      this.logError("AI edit request failed.", error);
+      const message = error instanceof Error ? error.message : "Unknown error occurred.";
+      new Notice(`Failed to fetch Writers Room edits: ${message}`);
+    } finally {
+      loadingNotice.hide();
+      this.setRequestState(false);
+    }
+  }
+
+  private extractJsonFromResponse(content: string): string | null {
+    const fenced = content.match(/```json\s*([\s\S]*?)```/i);
+    if (fenced && fenced[1]) {
+      return fenced[1].trim();
+    }
+
+    const start = content.indexOf("{");
+    const end = content.lastIndexOf("}");
+    if (start !== -1 && end !== -1 && end > start) {
+      return content.slice(start, end + 1).trim();
+    }
+
+    return null;
+  }
+
+  private parseAiPayload(jsonText: string): EditPayload {
+    let raw: unknown;
+    try {
+      raw = JSON.parse(jsonText);
+    } catch (error) {
+      this.logError("Failed to parse JSON returned by OpenAI.", error, {
+        snippet: jsonText.slice(0, 500)
+      });
+      throw new Error("OpenAI response was not valid JSON.");
+    }
+
+    const normalized = this.normalizeAiPayload(raw);
+    return parseEditPayload(normalized);
+  }
+
+  private normalizeAiPayload(raw: unknown): unknown {
+    if (Array.isArray(raw)) {
+      this.logWarn("AI payload wrapped in array; using first element.", {
+        length: raw.length
+      });
+      raw = raw[0] ?? {};
+    }
+
+    if (!raw || typeof raw !== "object") {
+      return raw;
+    }
+
+    const record = { ...(raw as Record<string, unknown>) };
+
+    if ("summary" in record && typeof record.summary !== "string") {
+      this.logWarn("Coercing summary to string.", { summary: record.summary });
+      record.summary = record.summary == null ? "" : String(record.summary);
+    }
+
+    if (!("summary" in record) || typeof record.summary !== "string" || record.summary.trim().length === 0) {
+      this.logWarn("Applying fallback summary for AI payload.");
+      record.summary = "Editors provided automated revision suggestions.";
+    }
+
+    const editsRaw = record.edits;
+    let editsArray: unknown[] = [];
+
+    if (Array.isArray(editsRaw)) {
+      editsArray = editsRaw;
+    } else if (editsRaw && typeof editsRaw === "object") {
+      this.logWarn("Coercing edits object into array.");
+      editsArray = Object.values(editsRaw as Record<string, unknown>);
+    } else if (editsRaw != null) {
+      this.logWarn("Edits payload not array; ignoring invalid value.", {
+        edits: editsRaw
+      });
+    }
+
+    record.edits = editsArray
+      .map((entry, index) => this.normalizeAiEdit(entry, index))
+      .filter((value): value is Record<string, unknown> => value !== null);
+
+    return record;
+  }
+
+  private normalizeAiEdit(entry: unknown, index: number): Record<string, unknown> | null {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      this.logWarn("Dropping malformed edit entry.", { index, entry });
+      return null;
+    }
+
+    const record = { ...(entry as Record<string, unknown>) };
+
+    if (typeof record.agent !== "string" || record.agent.trim().length === 0) {
+      this.logWarn("Setting missing agent to 'editor'.", { index, agent: record.agent });
+      record.agent = "editor";
+    } else if (record.agent.trim().toLowerCase() !== "editor") {
+      this.logWarn("Normalizing agent value to 'editor'.", { index, agent: record.agent });
+      record.agent = "editor";
+    }
+
+    const typeLookup: Record<string, string> = {
+      addition: "addition",
+      add: "addition",
+      suggestion: "addition",
+      subtraction: "subtraction",
+      remove: "subtraction",
+      deletion: "subtraction",
+      annotation: "annotation",
+      comment: "annotation",
+      note: "annotation"
+    };
+
+    if (typeof record.type === "string") {
+      const normalized = record.type.toLowerCase().trim();
+      record.type = typeLookup[normalized] ?? normalized;
+    }
+
+    const categoryLookup: Record<string, string> = {
+      flow: "flow",
+      pacing: "flow",
+      rhythm: "rhythm",
+      cadence: "rhythm",
+      sensory: "sensory",
+      imagery: "sensory",
+      punch: "punch",
+      impact: "punch"
+    };
+
+    if (typeof record.category === "string") {
+      const normalized = record.category.toLowerCase().trim();
+      record.category = categoryLookup[normalized] ?? normalized;
+    }
+
+    if (!("original_text" in record) || typeof record.original_text !== "string") {
+      if (record.original_text == null) {
+        this.logWarn("Dropping edit without original_text.", { index });
+        return null;
+      }
+      this.logWarn("Coercing original_text to string.", {
+        index,
+        original_text: record.original_text
+      });
+      record.original_text = String(record.original_text);
+    }
+
+    if (record.output == null) {
+      record.output = null;
+    } else if (typeof record.output !== "string") {
+      if (Array.isArray(record.output)) {
+        this.logWarn("Flattening array output into string.", { index });
+        record.output = record.output
+          .map((value) => (typeof value === "string" ? value : String(value ?? "")))
+          .join("\n");
+      } else if (typeof record.output === "object" && record.output !== null && "text" in record.output) {
+        const value = (record.output as { text?: string }).text;
+        record.output = typeof value === "string" ? value : String(value ?? "");
+      } else {
+        this.logWarn("Coercing non-string output to string.", { index, output: record.output });
+        record.output = String(record.output);
+      }
+    }
+
+    if (typeof record.line !== "number" || !Number.isInteger(record.line)) {
+      const coerced = Number(record.line);
+      if (Number.isFinite(coerced)) {
+        this.logWarn("Coercing non-integer line value to integer.", { index, line: record.line });
+        record.line = Math.max(1, Math.trunc(coerced));
+      } else {
+        this.logWarn("Dropping edit with invalid line number.", { index, line: record.line });
+        return null;
+      }
+    }
+
+    if (typeof record.line !== "number" || !Number.isInteger(record.line) || record.line < 1) {
+      this.logWarn("Dropping edit with unresolved line number.", { index, line: record.line });
+      return null;
+    }
+
+    if (typeof record.original_text === "string") {
+      record.original_text = record.original_text.trimEnd();
+    }
+
+    if (typeof record.output === "string") {
+      record.output = record.output.trimEnd();
+    }
+
+    return record;
   }
 
   private async openSidebarForActiveFile(): Promise<void> {
@@ -569,6 +1100,7 @@ export default class WritersRoomPlugin extends Plugin {
 
   registerSidebar(view: WritersRoomSidebarView): void {
     this.sidebarView = view;
+    view.setRequestState(this.requestInProgress);
     void this.refreshSidebarForActiveFile();
   }
 
@@ -702,6 +1234,14 @@ export default class WritersRoomPlugin extends Plugin {
           inset 0 0 0 1px rgba(255, 255, 255, 0.6);
       }
 
+      .writersroom-highlight-block {
+        display: block;
+        width: 100%;
+        box-sizing: border-box;
+        margin: 0.1rem 0;
+        padding: 0.05rem 0.1rem;
+      }
+
       .writersroom-sidebar {
         display: flex;
         flex-direction: column;
@@ -713,9 +1253,37 @@ export default class WritersRoomPlugin extends Plugin {
         border-bottom: 1px solid var(--divider-color);
       }
 
+      .writersroom-sidebar-header-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+
       .writersroom-sidebar-title {
         font-weight: 600;
-        margin-bottom: 0.35rem;
+          margin-bottom: 0;
+      }
+
+      .writersroom-sidebar-button {
+        background-color: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        border: none;
+        border-radius: 4px;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.8em;
+        font-weight: 500;
+        cursor: pointer;
+        transition: opacity 0.2s ease;
+      }
+
+      .writersroom-sidebar-button:hover:not(:disabled) {
+        opacity: 0.85;
+      }
+
+      .writersroom-sidebar-button:disabled {
+        opacity: 0.55;
+        cursor: default;
       }
 
       .writersroom-sidebar-summary {
@@ -884,6 +1452,7 @@ export default class WritersRoomPlugin extends Plugin {
 
   async saveSettings() {
     await this.saveData(this.settings);
+    this.sidebarView?.setRequestState(this.requestInProgress);
   }
 }
 
@@ -894,6 +1463,8 @@ class WritersRoomSidebarView extends ItemView {
     payload: null,
     selectedAnchorId: null
   };
+  private requestButton: HTMLButtonElement | null = null;
+  private isRequesting = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
     super(leaf);
@@ -925,6 +1496,7 @@ class WritersRoomSidebarView extends ItemView {
       payload: null,
       selectedAnchorId: null
     };
+    this.requestButton = null;
   }
 
   setState(state: SidebarState): void {
@@ -934,6 +1506,11 @@ class WritersRoomSidebarView extends ItemView {
       selectedAnchorId: state.selectedAnchorId ?? null
     };
     this.render();
+  }
+
+  setRequestState(requesting: boolean): void {
+    this.isRequesting = requesting;
+    this.applyRequestState();
   }
 
   updateSelection(anchorId: string | null): void {
@@ -950,12 +1527,36 @@ class WritersRoomSidebarView extends ItemView {
       cls: "writersroom-sidebar-header"
     });
 
+    const headerTop = header.createDiv({
+      cls: "writersroom-sidebar-header-top"
+    });
+
     const fileLabel =
       this.state.sourcePath?.split("/").pop() ?? "No document selected";
-    header.createEl("div", {
+    headerTop.createEl("div", {
       cls: "writersroom-sidebar-title",
       text: fileLabel
     });
+
+    const askButton = headerTop.createEl("button", {
+      cls: "writersroom-sidebar-button",
+      text: "Ask the writers"
+    });
+
+    askButton.addEventListener("click", (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.isRequesting || !this.state.sourcePath) {
+        return;
+      }
+      void this.plugin.requestAiEditsForActiveFile(
+        "sidebar",
+        this.state.sourcePath
+      );
+    });
+
+    this.requestButton = askButton;
+    this.applyRequestState();
 
     if (this.state.payload?.summary) {
       header.createEl("div", {
@@ -1046,6 +1647,35 @@ class WritersRoomSidebarView extends ItemView {
       activeItem.classList.add("is-selected");
       activeItem.scrollIntoView({ block: "nearest" });
     }
+  }
+
+  private applyRequestState(): void {
+    if (!this.requestButton) {
+      return;
+    }
+
+    const apiKeyMissing = this.plugin.settings.apiKey.trim().length === 0;
+    const disabled = this.isRequesting || !this.state.sourcePath || apiKeyMissing;
+    if (disabled) {
+      this.requestButton.setAttribute("disabled", "true");
+    } else {
+      this.requestButton.removeAttribute("disabled");
+    }
+
+    if (apiKeyMissing) {
+      this.requestButton.setAttribute("title", "Add your OpenAI API key in Writers Room settings to enable this action.");
+    } else {
+      this.requestButton.removeAttribute("title");
+    }
+
+    this.requestButton.textContent = this.isRequesting
+      ? "Asking…"
+      : "Ask the writers";
+
+    this.requestButton.setAttribute(
+      "aria-busy",
+      this.isRequesting ? "true" : "false"
+    );
   }
 }
 

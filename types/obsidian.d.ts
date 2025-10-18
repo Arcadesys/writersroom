@@ -11,6 +11,7 @@ declare module "obsidian" {
     getLeavesOfType(viewType: string): WorkspaceLeaf[];
     getRightLeaf(replace?: boolean): WorkspaceLeaf | null;
     revealLeaf(leaf: WorkspaceLeaf): Promise<void>;
+    getActiveViewOfType<T extends ItemView>(view: new (...args: any[]) => T): T | null;
   }
 
   export class WorkspaceLeaf {
@@ -23,6 +24,26 @@ declare module "obsidian" {
     constructor(leaf: WorkspaceLeaf);
     getViewType(): string;
     getDisplayText(): string;
+  }
+
+  export class MarkdownView extends ItemView {
+    editor: Editor;
+    file: TFile;
+    previewMode: MarkdownPreviewRenderer;
+  }
+
+  export class MarkdownPreviewRenderer {
+    containerEl: HTMLElement;
+  }
+
+  export interface Editor {
+    setCursor(pos: EditorPosition): void;
+    scrollIntoView(range: { from: EditorPosition; to: EditorPosition }, center?: boolean): void;
+  }
+
+  export interface EditorPosition {
+    line: number;
+    ch: number;
   }
 
   export interface MarkdownSectionInformation {
@@ -79,7 +100,8 @@ declare module "obsidian" {
   export interface Command {
     id: string;
     name: string;
-    callback: () => void;
+    callback?: () => void;
+    checkCallback?: (checking: boolean) => boolean;
   }
 
   export interface PluginManifest {
