@@ -167,6 +167,100 @@ describe("parseEditPayload", () => {
     const secondParse = parseEditPayload(payload);
     expect(firstParse.edits[0].anchor).toBe(secondParse.edits[0].anchor);
   });
+
+  it("accepts empty string output for subtraction edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 3,
+          type: "subtraction",
+          category: "flow",
+          original_text: "This sentence can go.",
+          output: ""
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].type).toBe("subtraction");
+    expect(result.edits[0].output).toBe("");
+  });
+
+  it("accepts empty string output for replacement edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 4,
+          type: "replacement",
+          category: "flow",
+          original_text: "Delete this.",
+          output: ""
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].type).toBe("replacement");
+    expect(result.edits[0].output).toBe("");
+  });
+
+  it("rejects empty string output for addition edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 2,
+          type: "addition",
+          category: "flow",
+          original_text: "Text",
+          output: ""
+        }
+      ]
+    };
+
+    expect(() => parseEditPayload(payload)).toThrowError(/output cannot be empty string for addition edits/);
+  });
+
+  it("rejects empty string output for annotation edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 5,
+          type: "annotation",
+          category: "punch",
+          original_text: "Text",
+          output: ""
+        }
+      ]
+    };
+
+    expect(() => parseEditPayload(payload)).toThrowError(/output cannot be empty string for annotation edits/);
+  });
+
+  it("rejects empty string output for star edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 6,
+          type: "star",
+          category: "punch",
+          original_text: "Great line!",
+          output: ""
+        }
+      ]
+    };
+
+    expect(() => parseEditPayload(payload)).toThrowError(/output cannot be empty string for star edits/);
+  });
 });
 
 describe("parseEditPayloadFromString", () => {

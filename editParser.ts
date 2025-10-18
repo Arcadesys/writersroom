@@ -9,6 +9,7 @@ export interface EditEntry {
   category: EditCategory;
   original_text: string;
   output: string | null;
+  annotation?: string | null; // Optional annotation merged from annotation edit on same line
 }
 
 export interface EditPayload {
@@ -136,8 +137,14 @@ function parseEdit(entry: unknown, index: number): EditEntry {
     `${path}.output`
   );
 
-  if (typeof output === "string") {
-    assert(output.length > 0, "output cannot be empty string", `${path}.output`);
+  // Allow empty strings for subtraction edits (deletion) and replacement edits (replace with nothing)
+  if (typeof output === "string" && output.length === 0) {
+    const allowEmptyOutput = type === "subtraction" || type === "replacement";
+    assert(
+      allowEmptyOutput,
+      `output cannot be empty string for ${type} edits (use null for subtraction, or provide replacement text)`,
+      `${path}.output`
+    );
   }
 
   const anchorCandidate =
@@ -167,6 +174,64 @@ function parseEdit(entry: unknown, index: number): EditEntry {
   };
 }
 
+/**
+ * Combines annotations with other edits on the same line to reduce visual noise.
+ * If an annotation and a replacement (or other substantive edit) target the same line,
+ * merge the annotation text into the substantive edit.
+ */
+function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
+  // Group edits by line number
+  const editsByLine = new Map<number, EditEntry[]>();
+  
+  for (const edit of edits) {
+    const existing = editsByLine.get(edit.line) || [];
+    existing.push(edit);
+    editsByLine.set(edit.line, existing);
+  }
+
+  const combined: EditEntry[] = [];
+
+  for (const [line, lineEdits] of editsByLine) {
+    // If only one edit on this line, keep it as-is
+    if (lineEdits.length === 1) {
+      combined.push(lineEdits[0]);
+      continue;
+    }
+
+    // Find annotation and substantive edits (replacement, addition, subtraction, star)
+    const annotations = lineEdits.filter(e => e.type === "annotation");
+    const substantiveEdits = lineEdits.filter(e => e.type !== "annotation");
+
+    // If no annotations, keep all edits
+    if (annotations.length === 0) {
+      combined.push(...lineEdits);
+      continue;
+    }
+
+    // If we have both annotations and substantive edits, merge them
+    if (substantiveEdits.length > 0) {
+      // Combine annotation text
+      const annotationText = annotations
+        .map(a => a.output || "")
+        .filter(text => text.length > 0)
+        .join(" ");
+
+      // Merge annotations into substantive edits
+      for (const edit of substantiveEdits) {
+        combined.push({
+          ...edit,
+          annotation: annotationText || null
+        });
+      }
+    } else {
+      // Only annotations on this line, keep them
+      combined.push(...annotations);
+    }
+  }
+
+  return combined;
+}
+
 export function parseEditPayload(raw: unknown): EditPayload {
   assert(isRecord(raw), "Payload must be an object");
 
@@ -178,10 +243,13 @@ export function parseEditPayload(raw: unknown): EditPayload {
   assert(Array.isArray(edits), "edits must be an array", "edits");
 
   const parsedEdits = edits.map((entry, index) => parseEdit(entry, index));
+  
+  // Combine annotations with other edits on the same line
+  const combinedEdits = combineEditsOnSameLine(parsedEdits);
 
   return {
     summary: summary.trim(),
-    edits: parsedEdits
+    edits: combinedEdits
   };
 }
 

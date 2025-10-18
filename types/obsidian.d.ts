@@ -129,6 +129,7 @@ declare module "obsidian" {
     manifest: PluginManifest;
     addCommand(command: Command): void;
     addSettingTab(tab: PluginSettingTab): void;
+    addRibbonIcon(icon: string, title: string, callback: (evt: MouseEvent) => void): HTMLElement;
     registerView(type: string, callback: (leaf: WorkspaceLeaf) => ItemView): void;
     registerEvent(eventRef: EventRef): void;
     registerMarkdownPostProcessor(

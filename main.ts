@@ -204,13 +204,272 @@ import {
 
 const WR_VIEW_TYPE = "writersroom-sidebar";
 
+// Audicon system for accessibility - provides audio feedback for actions
+type AudiconType = 
+  | "selection"      // When an edit is selected
+  | "apply"          // When an edit is applied
+  | "resolve"        // When an edit is resolved/dismissed
+  | "request-start"  // When requesting new edits
+  | "request-complete" // When edits are received
+  | "request-error"  // When request fails
+  | "navigate-next"  // Navigation between edits
+  | "navigate-prev";
+
+class AudiconPlayer {
+  private audioContext: AudioContext | null = null;
+  private enabled: boolean = true;
+
+  constructor() {
+    if (typeof window !== "undefined" && typeof AudioContext !== "undefined") {
+      try {
+        this.audioContext = new AudioContext();
+      } catch (error) {
+        console.warn("[WritersRoom] Audio context unavailable for audicons:", error);
+        this.enabled = false;
+      }
+    } else {
+      this.enabled = false;
+    }
+  }
+
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  play(type: AudiconType): void {
+    if (!this.enabled || !this.audioContext) {
+      return;
+    }
+
+    try {
+      const ctx = this.audioContext;
+      const now = ctx.currentTime;
+
+      // Create gain node for volume control
+      const gainNode = ctx.createGain();
+      gainNode.connect(ctx.destination);
+      gainNode.gain.setValueAtTime(0.15, now); // Low volume to not be intrusive
+
+      // Create oscillator
+      const osc = ctx.createOscillator();
+      osc.connect(gainNode);
+
+      // Define different sounds for different actions
+      switch (type) {
+        case "selection":
+          // Soft ascending tone
+          osc.frequency.setValueAtTime(440, now);
+          osc.frequency.exponentialRampToValueAtTime(660, now + 0.08);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+          osc.start(now);
+          osc.stop(now + 0.08);
+          break;
+
+        case "apply":
+          // Confident double-beep
+          osc.frequency.setValueAtTime(523.25, now);
+          gainNode.gain.setValueAtTime(0.15, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+          osc.start(now);
+          osc.stop(now + 0.06);
+          
+          // Second beep
+          const osc2 = ctx.createOscillator();
+          const gain2 = ctx.createGain();
+          osc2.connect(gain2);
+          gain2.connect(ctx.destination);
+          osc2.frequency.setValueAtTime(659.25, now + 0.08);
+          gain2.gain.setValueAtTime(0.15, now + 0.08);
+          gain2.gain.exponentialRampToValueAtTime(0.01, now + 0.14);
+          osc2.start(now + 0.08);
+          osc2.stop(now + 0.14);
+          break;
+
+        case "resolve":
+          // Descending tone (dismissal)
+          osc.frequency.setValueAtTime(660, now);
+          osc.frequency.exponentialRampToValueAtTime(440, now + 0.08);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+          osc.start(now);
+          osc.stop(now + 0.08);
+          break;
+
+        case "request-start":
+          // Ascending sweep
+          osc.frequency.setValueAtTime(330, now);
+          osc.frequency.exponentialRampToValueAtTime(880, now + 0.15);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+          osc.start(now);
+          osc.stop(now + 0.15);
+          break;
+
+        case "request-complete":
+          // Success chime (3 ascending notes)
+          osc.frequency.setValueAtTime(523.25, now);
+          gainNode.gain.setValueAtTime(0.12, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.06);
+          osc.start(now);
+          osc.stop(now + 0.06);
+
+          const osc3 = ctx.createOscillator();
+          const gain3 = ctx.createGain();
+          osc3.connect(gain3);
+          gain3.connect(ctx.destination);
+          osc3.frequency.setValueAtTime(659.25, now + 0.08);
+          gain3.gain.setValueAtTime(0.12, now + 0.08);
+          gain3.gain.exponentialRampToValueAtTime(0.01, now + 0.14);
+          osc3.start(now + 0.08);
+          osc3.stop(now + 0.14);
+
+          const osc4 = ctx.createOscillator();
+          const gain4 = ctx.createGain();
+          osc4.connect(gain4);
+          gain4.connect(ctx.destination);
+          osc4.frequency.setValueAtTime(783.99, now + 0.16);
+          gain4.gain.setValueAtTime(0.12, now + 0.16);
+          gain4.gain.exponentialRampToValueAtTime(0.01, now + 0.24);
+          osc4.start(now + 0.16);
+          osc4.stop(now + 0.24);
+          break;
+
+        case "request-error":
+          // Low error tone
+          osc.frequency.setValueAtTime(200, now);
+          osc.type = "sawtooth";
+          gainNode.gain.setValueAtTime(0.1, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+          osc.start(now);
+          osc.stop(now + 0.2);
+          break;
+
+        case "navigate-next":
+          // Quick high blip
+          osc.frequency.setValueAtTime(880, now);
+          gainNode.gain.setValueAtTime(0.1, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.04);
+          osc.start(now);
+          osc.stop(now + 0.04);
+          break;
+
+        case "navigate-prev":
+          // Quick low blip
+          osc.frequency.setValueAtTime(660, now);
+          gainNode.gain.setValueAtTime(0.1, now);
+          gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.04);
+          osc.start(now);
+          osc.stop(now + 0.04);
+          break;
+      }
+    } catch (error) {
+      // Silently fail - audicons are nice-to-have
+      console.debug("[WritersRoom] Audicon playback failed:", error);
+    }
+  }
+
+  dispose(): void {
+    if (this.audioContext) {
+      try {
+        void this.audioContext.close();
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      this.audioContext = null;
+    }
+  }
+}
+
 // Settings interface and defaults (moved here for facet)
+type ColorScheme = "default" | "high-contrast" | "colorblind-friendly" | "muted" | "warm" | "cool";
+
 interface WritersRoomSettings {
   apiKey: string;
+  colorScheme: ColorScheme;
+  audibleFeedback: boolean; // Enable/disable audicons
 }
 
 const DEFAULT_SETTINGS: WritersRoomSettings = {
-  apiKey: ""
+  apiKey: "",
+  colorScheme: "default",
+  audibleFeedback: true
+};
+
+const TOKEN_TICKER_VARIANTS: Array<{ label: string; badge: string }> = [
+  { label: "Token sparkle parade", badge: "***" },
+  { label: "Story fuel gauge", badge: "+++" },
+  { label: "Muse meter", badge: "~~~" },
+  { label: "Cadence counter", badge: "///" },
+  { label: "Idea drumbeat", badge: ">>>" }
+];
+
+interface ColorPalette {
+  addition: { bg: string; border: string };
+  replacement: { bg: string; border: string };
+  subtraction: { bg: string; border: string };
+  annotation: { bg: string; border: string };
+  star: { bg: string; border: string };
+  hover: string;
+  active: { bg: string; border: string };
+}
+
+const COLOR_SCHEMES: Record<ColorScheme, ColorPalette> = {
+  "default": {
+    addition: { bg: "rgba(76, 175, 80, 0.15)", border: "rgba(76, 175, 80, 0.3)" },
+    replacement: { bg: "rgba(255, 152, 0, 0.15)", border: "rgba(255, 152, 0, 0.3)" },
+    subtraction: { bg: "rgba(244, 67, 54, 0.12)", border: "rgba(244, 67, 54, 0.3)" },
+    annotation: { bg: "rgba(63, 81, 181, 0.12)", border: "rgba(63, 81, 181, 0.3)" },
+    star: { bg: "rgba(255, 215, 0, 0.18)", border: "rgba(255, 215, 0, 0.5)" },
+    hover: "rgba(255, 193, 7, 0.25)",
+    active: { bg: "rgba(255, 193, 7, 0.3)", border: "rgba(255, 193, 7, 0.8)" }
+  },
+  "high-contrast": {
+    addition: { bg: "rgba(0, 200, 0, 0.25)", border: "rgba(0, 200, 0, 0.6)" },
+    replacement: { bg: "rgba(255, 140, 0, 0.25)", border: "rgba(255, 140, 0, 0.6)" },
+    subtraction: { bg: "rgba(255, 0, 0, 0.25)", border: "rgba(255, 0, 0, 0.6)" },
+    annotation: { bg: "rgba(0, 100, 255, 0.25)", border: "rgba(0, 100, 255, 0.6)" },
+    star: { bg: "rgba(255, 215, 0, 0.3)", border: "rgba(255, 200, 0, 0.7)" },
+    hover: "rgba(255, 180, 0, 0.4)",
+    active: { bg: "rgba(255, 200, 0, 0.4)", border: "rgba(255, 180, 0, 1)" }
+  },
+  "colorblind-friendly": {
+    // Using colors that work for most types of color blindness (protanopia, deuteranopia, tritanopia)
+    addition: { bg: "rgba(0, 114, 178, 0.2)", border: "rgba(0, 114, 178, 0.5)" }, // Blue
+    replacement: { bg: "rgba(230, 159, 0, 0.2)", border: "rgba(230, 159, 0, 0.5)" }, // Orange
+    subtraction: { bg: "rgba(213, 94, 0, 0.2)", border: "rgba(213, 94, 0, 0.5)" }, // Vermillion
+    annotation: { bg: "rgba(86, 180, 233, 0.2)", border: "rgba(86, 180, 233, 0.5)" }, // Sky blue
+    star: { bg: "rgba(240, 228, 66, 0.25)", border: "rgba(240, 228, 66, 0.6)" }, // Yellow
+    hover: "rgba(204, 121, 167, 0.3)", // Reddish purple
+    active: { bg: "rgba(204, 121, 167, 0.35)", border: "rgba(204, 121, 167, 0.8)" }
+  },
+  "muted": {
+    // Softer, less saturated colors for reduced eye strain
+    addition: { bg: "rgba(140, 200, 140, 0.12)", border: "rgba(140, 200, 140, 0.25)" },
+    replacement: { bg: "rgba(220, 180, 120, 0.12)", border: "rgba(220, 180, 120, 0.25)" },
+    subtraction: { bg: "rgba(200, 140, 140, 0.12)", border: "rgba(200, 140, 140, 0.25)" },
+    annotation: { bg: "rgba(140, 160, 200, 0.12)", border: "rgba(140, 160, 200, 0.25)" },
+    star: { bg: "rgba(230, 220, 140, 0.15)", border: "rgba(230, 220, 140, 0.35)" },
+    hover: "rgba(200, 180, 140, 0.2)",
+    active: { bg: "rgba(200, 180, 140, 0.25)", border: "rgba(200, 180, 140, 0.6)" }
+  },
+  "warm": {
+    // Warmer tones - reds, oranges, yellows
+    addition: { bg: "rgba(255, 193, 7, 0.15)", border: "rgba(255, 193, 7, 0.4)" },
+    replacement: { bg: "rgba(255, 152, 0, 0.18)", border: "rgba(255, 152, 0, 0.4)" },
+    subtraction: { bg: "rgba(244, 67, 54, 0.15)", border: "rgba(244, 67, 54, 0.4)" },
+    annotation: { bg: "rgba(233, 138, 21, 0.15)", border: "rgba(233, 138, 21, 0.4)" },
+    star: { bg: "rgba(255, 235, 59, 0.2)", border: "rgba(255, 235, 59, 0.5)" },
+    hover: "rgba(255, 160, 0, 0.3)",
+    active: { bg: "rgba(255, 160, 0, 0.35)", border: "rgba(255, 140, 0, 0.7)" }
+  },
+  "cool": {
+    // Cooler tones - blues, greens, purples
+    addition: { bg: "rgba(66, 165, 245, 0.15)", border: "rgba(66, 165, 245, 0.4)" },
+    replacement: { bg: "rgba(156, 39, 176, 0.15)", border: "rgba(156, 39, 176, 0.4)" },
+    subtraction: { bg: "rgba(103, 58, 183, 0.15)", border: "rgba(103, 58, 183, 0.4)" },
+    annotation: { bg: "rgba(0, 150, 136, 0.15)", border: "rgba(0, 150, 136, 0.4)" },
+    star: { bg: "rgba(0, 188, 212, 0.18)", border: "rgba(0, 188, 212, 0.5)" },
+    hover: "rgba(100, 150, 200, 0.25)",
+    active: { bg: "rgba(100, 150, 200, 0.3)", border: "rgba(80, 130, 200, 0.7)" }
+  }
 };
 
 interface EditorHighlightSpec {
@@ -243,11 +502,13 @@ export const writersRoomEditorHighlightsField: CMStateField<CMDecorationSet> = S
   }
 });
 
-// ViewPlugin for viewport-optimized rendering
+// ViewPlugin for viewport-optimized rendering and click handling
 class WritersRoomViewPlugin implements CMPluginValue {
   decorations: CMDecorationSet;
+  private view: CMEditorView;
 
   constructor(view: CMEditorView) {
+    this.view = view;
     this.decorations = this.buildDecorations(view);
   }
 
@@ -286,9 +547,47 @@ class WritersRoomViewPlugin implements CMPluginValue {
   }
 }
 
-// Create the ViewPlugin with decorations spec
+// Create the ViewPlugin with decorations spec and event handlers
 const writersRoomViewPlugin = ViewPlugin.fromClass(WritersRoomViewPlugin, {
-  decorations: (plugin) => plugin.decorations
+  decorations: (plugin) => plugin.decorations,
+  eventHandlers: {
+    // Handle mousedown events to capture clicks on highlighted lines
+    // We use mousedown instead of click to catch the event before cursor placement
+    mousedown: (event: MouseEvent, view: CMEditorView) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) {
+        return false;
+      }
+
+      // Find the closest line element with writersroom highlight attributes
+      const lineElement = target.closest<HTMLElement>(".cm-line[data-writersroom-anchor]");
+      if (!lineElement) {
+        return false; // Not a highlighted line, allow default behavior
+      }
+
+      const anchorId = lineElement.getAttribute("data-writersroom-anchor");
+      const sourcePath = lineElement.dataset.wrSource;
+
+      if (!anchorId || !sourcePath) {
+        return false;
+      }
+
+      // Allow the default cursor placement to happen
+      // Then asynchronously sync the selection to the sidebar
+      // Use setTimeout to let CodeMirror process the click first
+      setTimeout(() => {
+        // Get the plugin instance from the global window object
+        // This is set during plugin initialization
+        const plugin = (window as unknown as { writersRoomPlugin?: WritersRoomPlugin }).writersRoomPlugin;
+        if (plugin) {
+          void plugin.handleAnchorClick(sourcePath, anchorId);
+        }
+      }, 0);
+
+      // Return false to allow default cursor placement behavior
+      return false;
+    }
+  }
 });
 
 // Export the complete extension for registration
@@ -309,24 +608,36 @@ function buildEditorHighlightDecorations(
 
   const builder = new RangeSetBuilder<CMDecoration>();
   const sorted = [...specs].sort((a, b) => a.from - b.from);
+  
+  // Group specs by line to avoid duplicate line decorations
+  const lineDecorations = new Map<number, EditorHighlightSpec>();
 
   for (const spec of sorted) {
     if (!(Number.isFinite(spec.from) && Number.isFinite(spec.to))) {
       console.warn("[WritersRoom] Skipping invalid decoration range", spec);
       continue;
     }
+    
+    // Store only the first decoration for each unique line position
+    // This prevents multiple decorations on the same line
+    if (!lineDecorations.has(spec.from)) {
+      lineDecorations.set(spec.from, spec);
+    }
+  }
 
-    // Use Decoration.mark() for inline text highlighting
-    // This highlights the actual text content with better visual clarity
-    const decoration = Decoration.mark({
+  // Create line decorations for entire lines as visual units
+  for (const spec of lineDecorations.values()) {
+    // Use Decoration.line() to highlight the entire line as a block
+    // This creates a unified visual element that doesn't interfere with cursor placement
+    const decoration = Decoration.line({
       class: spec.className,
       attributes: spec.attributes
     });
     
-    console.info("[WritersRoom] Creating mark decoration from", spec.from, "to", spec.to, "with class", spec.className);
+    console.info("[WritersRoom] Creating line decoration at", spec.from, "with class", spec.className);
     
-    // Mark decorations need both from and to positions
-    builder.add(spec.from, spec.to, decoration);
+    // Line decorations only need the line start position
+    builder.add(spec.from, spec.from, decoration);
   }
 
   const result = builder.finish();
@@ -373,11 +684,21 @@ interface SidebarProgressEntry {
   tone: SidebarProgressTone;
 }
 
+interface TokenTickerState {
+  target: number;
+  label: string;
+  badge: string;
+  generation: number;
+  lastBroadcastAt: number;
+  isComplete?: boolean;
+}
+
 interface SidebarState {
   sourcePath: string | null;
   payload: EditPayload | null;
   selectedAnchorId?: string | null;
   progressLog?: SidebarProgressEntry[];
+  tokenTicker?: TokenTickerState | null;
 }
 
 interface SidebarAction {
@@ -393,6 +714,7 @@ interface HighlightActivationOptions {
   scroll?: boolean;
   attempts?: number;
   editIndex?: number | null;
+  origin?: SelectionOrigin;
 }
 
 export default class WritersRoomPlugin extends Plugin {
@@ -416,6 +738,9 @@ export default class WritersRoomPlugin extends Plugin {
   private requestProgressTimer: number | null = null;
   private requestProgressMessageIndex = -1;
   private requestProgressActiveLabel: string | null = null;
+  private requestTokenStats: TokenTickerState | null = null;
+  private tokenTickerGeneration = 0;
+  audiconPlayer: AudiconPlayer | null = null; // Public for settings access
 
   private log(
     level: "debug" | "info" | "warn" | "error",
@@ -523,7 +848,12 @@ export default class WritersRoomPlugin extends Plugin {
       const settingsRaw = record.settings as Record<string, unknown>;
       const settings: WritersRoomSettings = {
         ...DEFAULT_SETTINGS,
-        apiKey: typeof settingsRaw.apiKey === "string" ? settingsRaw.apiKey : DEFAULT_SETTINGS.apiKey
+        apiKey: typeof settingsRaw.apiKey === "string" ? settingsRaw.apiKey : DEFAULT_SETTINGS.apiKey,
+        colorScheme: 
+          typeof settingsRaw.colorScheme === "string" && 
+          ["default", "high-contrast", "colorblind-friendly", "muted", "warm", "cool"].includes(settingsRaw.colorScheme)
+            ? (settingsRaw.colorScheme as ColorScheme)
+            : DEFAULT_SETTINGS.colorScheme
       };
 
       const editsRaw = record.edits;
@@ -740,6 +1070,13 @@ export default class WritersRoomPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
 
+    // Initialize audicon player for accessibility
+    this.audiconPlayer = new AudiconPlayer();
+    this.audiconPlayer.setEnabled(this.settings.audibleFeedback);
+
+    // Store plugin instance globally for access from CodeMirror event handlers
+    (window as unknown as { writersRoomPlugin?: WritersRoomPlugin }).writersRoomPlugin = this;
+
     this.activeSourcePath = this.app.workspace.getActiveFile()?.path ?? null;
     if (this.activeSourcePath) {
       const persisted = this.persistedEdits.get(this.activeSourcePath);
@@ -768,7 +1105,13 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerVaultListeners();
     this.registerWorkspaceListeners();
 
-    // Register click handler for both preview and edit mode highlights
+    // Add ribbon icon to sidebar
+    this.addRibbonIcon("book-open", "Open Writers Room", async () => {
+      await this.openSidebarForActiveFile();
+    });
+
+    // Register click handler for preview mode highlights
+    // Editor mode highlights are handled by CodeMirror event handlers
     (this as unknown as {
       registerDomEvent: (
         el: Document | HTMLElement,
@@ -783,6 +1126,11 @@ export default class WritersRoomPlugin extends Plugin {
 
       const anchor = target.closest<HTMLElement>("[data-writersroom-anchor]");
       if (!anchor) {
+        return;
+      }
+
+      // Skip if this is an editor decoration - those are handled by CodeMirror
+      if (anchor.dataset.wrBound === "editor") {
         return;
       }
 
@@ -918,6 +1266,18 @@ export default class WritersRoomPlugin extends Plugin {
   }
 
   onunload(): void {
+    // Clean up global plugin reference
+    const win = window as unknown as { writersRoomPlugin?: WritersRoomPlugin };
+    if (win.writersRoomPlugin === this) {
+      delete win.writersRoomPlugin;
+    }
+    
+    // Dispose of audicon player
+    if (this.audiconPlayer) {
+      this.audiconPlayer.dispose();
+      this.audiconPlayer = null;
+    }
+    
     if (this.styleEl?.parentElement) {
       this.styleEl.parentElement.removeChild(this.styleEl);
     }
@@ -1226,7 +1586,7 @@ export default class WritersRoomPlugin extends Plugin {
   return wrapper;
   }
 
-  private refreshEditorHighlights(): void {
+  refreshEditorHighlights(): void {
     this.applyEditorHighlightsToViews();
   }
 
@@ -1811,7 +2171,7 @@ export default class WritersRoomPlugin extends Plugin {
     return wrapper;
   }
 
-  private async handleAnchorClick(
+  async handleAnchorClick(
     sourcePath: string,
     anchorId: string
   ): Promise<void> {
@@ -1913,6 +2273,9 @@ export default class WritersRoomPlugin extends Plugin {
         editIndex: this.activeEditIndex
       });
     }
+
+    // Play resolve audicon for accessibility
+    this.audiconPlayer?.play("resolve");
 
     await this.refreshSidebarForActiveFile();
   }
@@ -2041,6 +2404,9 @@ export default class WritersRoomPlugin extends Plugin {
       payload = this.activePayload ?? payload;
     }
 
+    // Play apply audicon for accessibility
+    this.audiconPlayer?.play("apply");
+
     await this.resolveSidebarEdit(sourcePath, anchorId);
     new Notice(`Applied ${edit.type} on line ${edit.line}.`);
   }
@@ -2079,6 +2445,9 @@ export default class WritersRoomPlugin extends Plugin {
     const editIndex = match ? match.index : null;
     this.activeEditIndex = editIndex;
 
+    // Play selection audicon for accessibility
+    this.audiconPlayer?.play("selection");
+
     const view = await this.ensureSidebar({
       sourcePath,
       payload,
@@ -2091,7 +2460,8 @@ export default class WritersRoomPlugin extends Plugin {
     this.setActiveHighlight(anchorId, {
       scroll: shouldScroll,
       attempts: 0,
-      editIndex
+      editIndex,
+      origin  // Pass origin to know how to position cursor
     });
   }
 
@@ -2102,7 +2472,9 @@ export default class WritersRoomPlugin extends Plugin {
     view.setState({
       ...state,
       progressLog:
-        state.progressLog ?? this.getProgressEntriesForSource(state.sourcePath ?? this.activeSourcePath)
+        state.progressLog ?? this.getProgressEntriesForSource(state.sourcePath ?? this.activeSourcePath),
+      tokenTicker:
+        state.tokenTicker ?? this.getTokenTickerForSource(state.sourcePath ?? this.activeSourcePath)
     });
     return view;
   }
@@ -2245,6 +2617,7 @@ export default class WritersRoomPlugin extends Plugin {
     const attempt = options?.attempts ?? 0;
     const maxAttempts = 5;
     const shouldScroll = options?.scroll ?? false;
+    const origin = options?.origin ?? "highlight";
 
     const anchorElements = this.getAnchorElements(anchorId);
     const primaryTarget =
@@ -2265,7 +2638,8 @@ export default class WritersRoomPlugin extends Plugin {
       primaryTarget ?? null,
       anchorId,
       resolvedIndex ?? null,
-      shouldScroll
+      shouldScroll,
+      origin
     );
 
     if (!primaryTarget) {
@@ -2275,7 +2649,8 @@ export default class WritersRoomPlugin extends Plugin {
           this.setActiveHighlight(anchorId, {
             scroll: options?.scroll,
             attempts: attempt + 1,
-            editIndex: effectiveIndex
+            editIndex: effectiveIndex,
+            origin: options?.origin
           });
         }, 180);
       }
@@ -2284,6 +2659,21 @@ export default class WritersRoomPlugin extends Plugin {
 
     for (const element of anchorElements) {
       element.classList.add("writersroom-highlight-active");
+    }
+
+    // Add pulse animation for jump-to actions (accessibility enhancement)
+    const shouldPulse = shouldScroll && (origin === "sidebar" || origin === "highlight");
+    if (shouldPulse && typeof window !== "undefined") {
+      for (const element of anchorElements) {
+        element.classList.add("writersroom-highlight-pulse");
+      }
+      
+      // Remove pulse class after animation completes (1s duration)
+      window.setTimeout(() => {
+        for (const element of anchorElements) {
+          element.classList.remove("writersroom-highlight-pulse");
+        }
+      }, 1000);
     }
 
     if (
@@ -2300,7 +2690,8 @@ export default class WritersRoomPlugin extends Plugin {
           this.setActiveHighlight(anchorId, {
             scroll: options?.scroll,
             attempts: attempt + 1,
-            editIndex: effectiveIndex
+            editIndex: effectiveIndex,
+            origin: options?.origin
           });
         }
       }, delay);
@@ -2325,7 +2716,8 @@ export default class WritersRoomPlugin extends Plugin {
     target: HTMLElement | null,
     anchorId: string,
     editIndex: number | null,
-    shouldScroll: boolean
+    shouldScroll: boolean,
+    origin: SelectionOrigin = "highlight"
   ): void {
     const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
     let resolvedIndex = editIndex;
@@ -2383,47 +2775,55 @@ export default class WritersRoomPlugin extends Plugin {
       const editorLine = Math.max(0, Math.floor(lineNumber - 1));
       let column = 0;
 
-      const lineText =
-        typeof editorAny.getLine === "function"
-          ? editorAny.getLine(editorLine)
-          : undefined;
+      // For sidebar clicks, always position cursor at line start
+      // For editor clicks (highlight origin), keep cursor where user clicked
+      if (origin === "sidebar") {
+        // Position at line start for sidebar clicks
+        column = 0;
+      } else {
+        // For highlight origin (editor clicks), try to find the specific position
+        const lineText =
+          typeof editorAny.getLine === "function"
+            ? editorAny.getLine(editorLine)
+            : undefined;
 
-      const candidateValues = new Set<string>();
-      const addCandidate = (value: string | null | undefined) => {
-        if (typeof value !== "string") {
-          return;
-        }
-        if (!value.length) {
-          return;
-        }
-        candidateValues.add(value);
-        const trimmed = value.trim();
-        if (trimmed && trimmed !== value) {
-          candidateValues.add(trimmed);
-        }
-        const collapsed = value.replace(/\s+/g, " ").trim();
-        if (collapsed && !candidateValues.has(collapsed)) {
-          candidateValues.add(collapsed);
-        }
-      };
+        const candidateValues = new Set<string>();
+        const addCandidate = (value: string | null | undefined) => {
+          if (typeof value !== "string") {
+            return;
+          }
+          if (!value.length) {
+            return;
+          }
+          candidateValues.add(value);
+          const trimmed = value.trim();
+          if (trimmed && trimmed !== value) {
+            candidateValues.add(trimmed);
+          }
+          const collapsed = value.replace(/\s+/g, " ").trim();
+          if (collapsed && !candidateValues.has(collapsed)) {
+            candidateValues.add(collapsed);
+          }
+        };
 
-      addCandidate(target?.dataset?.wrMatch);
-      addCandidate(target?.textContent ?? "");
-      addCandidate(target?.dataset?.wrOriginal);
-      addCandidate(target?.dataset?.wrOutput);
-      if (resolvedEdit) {
-        addCandidate(resolvedEdit.original_text);
-        if (typeof resolvedEdit.output === "string") {
-          addCandidate(resolvedEdit.output);
+        addCandidate(target?.dataset?.wrMatch);
+        addCandidate(target?.textContent ?? "");
+        addCandidate(target?.dataset?.wrOriginal);
+        addCandidate(target?.dataset?.wrOutput);
+        if (resolvedEdit) {
+          addCandidate(resolvedEdit.original_text);
+          if (typeof resolvedEdit.output === "string") {
+            addCandidate(resolvedEdit.output);
+          }
         }
-      }
 
-      if (typeof lineText === "string" && candidateValues.size > 0) {
-        for (const candidate of candidateValues) {
-          const index = lineText.indexOf(candidate);
-          if (index !== -1) {
-            column = index;
-            break;
+        if (typeof lineText === "string" && candidateValues.size > 0) {
+          for (const candidate of candidateValues) {
+            const index = lineText.indexOf(candidate);
+            if (index !== -1) {
+              column = index;
+              break;
+            }
           }
         }
       }
@@ -2626,12 +3026,76 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
+  private getNextTokenTickerVariant(): { label: string; badge: string } {
+    const index = this.tokenTickerGeneration % TOKEN_TICKER_VARIANTS.length;
+    return TOKEN_TICKER_VARIANTS[index] ?? TOKEN_TICKER_VARIANTS[0];
+  }
+
+  private beginTokenTicker(): void {
+    const variant = this.getNextTokenTickerVariant();
+    this.tokenTickerGeneration += 1;
+    this.requestTokenStats = {
+      target: 0,
+      label: variant.label,
+      badge: variant.badge,
+      generation: this.tokenTickerGeneration,
+      lastBroadcastAt: Date.now()
+    };
+  }
+
+  private updateTokenTicker(target: number, options?: { force?: boolean; complete?: boolean }): void {
+    if (!this.requestTokenStats) {
+      this.beginTokenTicker();
+    }
+
+    if (!this.requestTokenStats) {
+      return;
+    }
+
+    const stats = this.requestTokenStats;
+
+    const targetIncreased = target > stats.target;
+    if (targetIncreased) {
+      stats.target = target;
+    }
+
+    if (options?.complete) {
+      stats.isComplete = true;
+    }
+
+    const now = Date.now();
+    const shouldBroadcast =
+      options?.complete ||
+      targetIncreased ||
+      !stats.lastBroadcastAt ||
+      now - stats.lastBroadcastAt >= 200 ||
+      options?.force;
+
+    if (shouldBroadcast) {
+      stats.lastBroadcastAt = now;
+      this.emitProgressUpdate();
+    }
+  }
+
+  private markTokenTickerComplete(finalCount?: number): void {
+    if (!this.requestTokenStats) {
+      return;
+    }
+    const target = Math.max(finalCount ?? this.requestTokenStats.target, this.requestTokenStats.target);
+    this.updateTokenTicker(target, { force: true, complete: true });
+  }
+
+  private clearTokenTicker(): void {
+    this.requestTokenStats = null;
+  }
+
   private startRequestProgress(sourcePath: string, initialMessage: string): void {
     this.cancelRequestProgressTimer();
     this.requestProgressSource = sourcePath;
     this.requestProgressEntries = [{ message: initialMessage, tone: "active" }];
     this.requestProgressActiveLabel = initialMessage;
     this.requestProgressMessageIndex = -1;
+    this.beginTokenTicker();
     this.emitProgressUpdate();
   }
 
@@ -2656,6 +3120,7 @@ export default class WritersRoomPlugin extends Plugin {
     let updated = false;
     const base = this.requestProgressActiveLabel;
     const composite = base ? `${base} - ${message}` : message;
+    
     for (let index = this.requestProgressEntries.length - 1; index >= 0; index -= 1) {
       const entry = this.requestProgressEntries[index];
       if (entry.tone === "active") {
@@ -2697,6 +3162,7 @@ export default class WritersRoomPlugin extends Plugin {
       entry.tone = "success";
     });
     this.requestProgressActiveLabel = null;
+    this.markTokenTickerComplete();
     if (message) {
       this.requestProgressEntries.push({ message, tone: "success" });
       if (this.requestProgressEntries.length > 8) {
@@ -2716,6 +3182,7 @@ export default class WritersRoomPlugin extends Plugin {
       }
     });
     this.requestProgressActiveLabel = null;
+    this.markTokenTickerComplete();
     this.requestProgressEntries.push({ message, tone: "error" });
     if (this.requestProgressEntries.length > 8) {
       this.requestProgressEntries = this.requestProgressEntries.slice(-8);
@@ -2729,6 +3196,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.requestProgressSource = null;
     this.requestProgressMessageIndex = -1;
     this.requestProgressActiveLabel = null;
+    this.clearTokenTicker();
     this.emitProgressUpdate();
   }
 
@@ -2751,6 +3219,19 @@ export default class WritersRoomPlugin extends Plugin {
     return this.requestProgressEntries.map((entry) => ({ ...entry }));
   }
 
+  private getTokenTickerForSource(sourcePath: string | null): TokenTickerState | null {
+    if (!sourcePath) {
+      return null;
+    }
+    if (this.requestProgressSource !== sourcePath) {
+      return null;
+    }
+    if (!this.requestTokenStats) {
+      return null;
+    }
+    return { ...this.requestTokenStats };
+  }
+
   private emitProgressUpdate(): void {
     if (!this.sidebarView) {
       return;
@@ -2758,12 +3239,14 @@ export default class WritersRoomPlugin extends Plugin {
 
     const sourcePath = this.activeSourcePath ?? this.requestProgressSource;
     const progressLog = this.getProgressEntriesForSource(sourcePath);
+    const tokenTicker = this.getTokenTickerForSource(sourcePath);
 
     this.sidebarView.setState({
       sourcePath: sourcePath ?? null,
       payload: this.activePayload,
       selectedAnchorId: this.activeAnchorId,
-      progressLog
+      progressLog,
+      tokenTicker
     });
   }
 
@@ -2863,6 +3346,9 @@ export default class WritersRoomPlugin extends Plugin {
     this.setRequestState(true);
     this.startRequestProgress(file.path, "Sending your note to the Writers…");
     const loadingNotice = new Notice("Asking the Writers…", 0);
+
+    // Play request start audicon for accessibility
+    this.audiconPlayer?.play("request-start");
 
     try {
       const systemPrompt = `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
@@ -2971,7 +3457,12 @@ Malformed or blank input example:
       let completion = "";
       let buffer = "";
       let lastReasoningUpdate = Date.now();
-      const reasoningThrottleMs = 400;
+      let lastProgressUpdate = Date.now();
+      const reasoningThrottleMs = 300;
+      const progressUpdateMs = 1000; // Update progress every second
+      let accumulatedReasoning = "";
+      let hasReceivedAnyData = false;
+      let tokensReceived = 0;
 
       try {
         while (true) {
@@ -2980,6 +3471,7 @@ Malformed or blank input example:
             break;
           }
 
+          hasReceivedAnyData = true;
           buffer += decoder.decode(value, { stream: true });
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
@@ -3013,19 +3505,32 @@ Malformed or blank input example:
 
               if (delta.content) {
                 completion += delta.content;
+                tokensReceived++;
+                this.updateTokenTicker(tokensReceived);
               }
 
               if (delta.reasoning_content) {
+                accumulatedReasoning += delta.reasoning_content;
                 const now = Date.now();
                 if (now - lastReasoningUpdate >= reasoningThrottleMs) {
-                  const reasoning = delta.reasoning_content.trim();
+                  const reasoning = accumulatedReasoning.trim();
                   if (reasoning.length > 0) {
-                    const display = reasoning.length > 120
-                      ? `${reasoning.slice(0, 117)}...`
-                      : reasoning;
+                    // Extract the most recent sentence or clause for display
+                    const sentences = reasoning.split(/[.!?]\s+/);
+                    const latestSentence = sentences[sentences.length - 1] || reasoning;
+                    const display = latestSentence.length > 120
+                      ? `${latestSentence.slice(0, 117)}...`
+                      : latestSentence;
                     this.updateActiveProgressMessage(display);
                     lastReasoningUpdate = now;
                   }
+                }
+              } else {
+                // If no reasoning content, periodically update with token count
+                const now = Date.now();
+                if (now - lastProgressUpdate >= progressUpdateMs) {
+                  this.updateActiveProgressMessage(`Received ${tokensReceived} tokens...`);
+                  lastProgressUpdate = now;
                 }
               }
             } catch (parseError) {
@@ -3036,6 +3541,13 @@ Malformed or blank input example:
       } finally {
         reader.releaseLock();
       }
+
+      // If we received data but no reasoning updates, still show progress
+      if (hasReceivedAnyData && accumulatedReasoning.length === 0) {
+        this.updateActiveProgressMessage(`Completed - received ${tokensReceived} tokens`);
+      }
+
+      this.markTokenTickerComplete(tokensReceived);
 
       this.advanceRequestProgress("Compiling the Writers response…");
 
@@ -3073,6 +3585,9 @@ Malformed or blank input example:
 
       this.completeRequestProgress(progressCompletionMessage);
 
+      // Play request complete audicon for accessibility
+      this.audiconPlayer?.play("request-complete");
+
       if (editsCount > 0) {
         const firstAnchor = this.getAnchorForEdit(payload.edits[0], 0);
         await this.selectEdit(file.path, firstAnchor, origin);
@@ -3086,6 +3601,10 @@ Malformed or blank input example:
       const message = error instanceof Error ? error.message : "Unknown error occurred.";
       const progressMessage = message.length > 160 ? `${message.slice(0, 157)}...` : message;
       this.failRequestProgress(`The Writers encountered an error: ${progressMessage}`);
+      
+      // Play request error audicon for accessibility
+      this.audiconPlayer?.play("request-error");
+      
       new Notice(`Failed to fetch Writers Room edits: ${message}`);
     } finally {
       loadingNotice.hide();
@@ -3311,7 +3830,8 @@ Malformed or blank input example:
         sourcePath: this.activeSourcePath,
         payload,
         selectedAnchorId: this.activeAnchorId,
-        progressLog: this.getProgressEntriesForSource(this.activeSourcePath)
+        progressLog: this.getProgressEntriesForSource(this.activeSourcePath),
+        tokenTicker: this.getTokenTickerForSource(this.activeSourcePath)
       });
 
       this.sidebarView.updateSelection(this.activeAnchorId);
@@ -3481,15 +4001,30 @@ Malformed or blank input example:
   }
 
   private injectStyles(): void {
-    if (this.styleEl || typeof document === "undefined") {
+    if (typeof document === "undefined") {
       return;
+    }
+
+    // Remove existing style if present
+    if (this.styleEl?.parentElement) {
+      this.styleEl.parentElement.removeChild(this.styleEl);
+      this.styleEl = null;
     }
 
     const style = document.createElement("style");
     style.setAttribute("data-writersroom-style", "true");
-    style.textContent = buildWritersRoomCss();
+    style.textContent = buildWritersRoomCss(this.settings.colorScheme);
     document.head.appendChild(style);
     this.styleEl = style;
+  }
+
+  updateStyles(): void {
+    // Force re-injection of styles with current color scheme
+    if (this.styleEl?.parentElement) {
+      this.styleEl.parentElement.removeChild(this.styleEl);
+      this.styleEl = null;
+    }
+    this.injectStyles();
   }
 
   private async onVaultModify(file: TFile): Promise<void> {
@@ -3711,45 +4246,101 @@ Malformed or blank input example:
   }
 }
 
-export function buildWritersRoomCss(): string {
+export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): string {
+  const colors = COLOR_SCHEMES[colorScheme];
+  
   return `
-      /* Inline mark decoration styles for edit mode */
-      .writersroom-highlight {
+      /* Keyframe animations */
+      @keyframes writersroom-highlight-pulse {
+        0% {
+          transform: scale(1);
+          filter: brightness(1);
+        }
+        50% {
+          transform: scale(1.02);
+          filter: brightness(1.3);
+        }
+        100% {
+          transform: scale(1);
+          filter: brightness(1);
+        }
+      }
+
+      @keyframes writersroom-token-glow {
+        0% {
+          box-shadow: 0 3px 10px rgba(255, 230, 180, 0.25);
+        }
+        50% {
+          box-shadow: 0 6px 20px rgba(255, 230, 180, 0.4);
+        }
+        100% {
+          box-shadow: 0 3px 10px rgba(255, 230, 180, 0.25);
+        }
+      }
+
+      @keyframes writersroom-progress-pulse {
+        0% {
+          opacity: 0.55;
+          transform: scale(0.9);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        100% {
+          opacity: 0.55;
+          transform: scale(0.9);
+        }
+      }
+
+      /* Edit mode line decoration styles - applied to entire .cm-line elements */
+      .cm-line.writersroom-highlight {
         background-color: rgba(255, 235, 59, 0.15);
         cursor: pointer;
         transition: background-color 0.2s ease;
-        border-radius: 2px;
-        padding: 1px 2px;
-      }
-
-      .writersroom-highlight[data-wr-type="addition"] {
-        background-color: rgba(76, 175, 80, 0.15);
-      }
-
-      .writersroom-highlight[data-wr-type="replacement"] {
-        background-color: rgba(255, 152, 0, 0.15);
-      }
-
-      .writersroom-highlight[data-wr-type="subtraction"] {
-        background-color: rgba(244, 67, 54, 0.12);
-      }
-
-      .writersroom-highlight[data-wr-type="annotation"] {
-        background-color: rgba(63, 81, 181, 0.12);
-      }
-
-      .writersroom-highlight[data-wr-type="star"] {
-        background-color: rgba(255, 215, 0, 0.18);
-      }
-
-      .writersroom-highlight:hover {
-        background-color: rgba(255, 193, 7, 0.25);
-      }
-
-      .writersroom-highlight-active {
-        background-color: rgba(255, 193, 7, 0.3);
-        border-left: 3px solid rgba(255, 193, 7, 0.8);
+        border-left: 3px solid transparent;
         padding-left: 4px;
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="addition"] {
+        background-color: ${colors.addition.bg};
+        border-left-color: ${colors.addition.border};
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="replacement"] {
+        background-color: ${colors.replacement.bg};
+        border-left-color: ${colors.replacement.border};
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="subtraction"] {
+        background-color: ${colors.subtraction.bg};
+        border-left-color: ${colors.subtraction.border};
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="annotation"] {
+        background-color: ${colors.annotation.bg};
+        border-left-color: ${colors.annotation.border};
+      }
+
+      .cm-line.writersroom-highlight[data-wr-type="star"] {
+        background-color: ${colors.star.bg};
+        border-left-color: ${colors.star.border};
+      }
+
+      .cm-line.writersroom-highlight:hover {
+        background-color: ${colors.hover};
+      }
+
+      .cm-line.writersroom-highlight-active {
+        background-color: ${colors.active.bg};
+        border-left-color: ${colors.active.border};
+        border-left-width: 4px;
+        padding-left: 3px;
+      }
+
+      /* Pulse animation for jump-to accessibility */
+      .cm-line.writersroom-highlight-pulse {
+        animation: writersroom-highlight-pulse 1s ease-out;
       }
 
       /* Preview mode highlights (keep existing for reading mode) */
@@ -3762,35 +4353,38 @@ export function buildWritersRoomCss(): string {
       }
 
       span.writersroom-highlight[data-wr-type="addition"] {
-        background-color: rgba(76, 175, 80, 0.2);
+        background-color: ${colors.addition.bg};
       }
 
       span.writersroom-highlight[data-wr-type="replacement"] {
-        background-color: rgba(255, 152, 0, 0.2);
+        background-color: ${colors.replacement.bg};
       }
 
       span.writersroom-highlight[data-wr-type="subtraction"] {
-        background-color: rgba(244, 67, 54, 0.15);
+        background-color: ${colors.subtraction.bg};
       }
 
       span.writersroom-highlight[data-wr-type="annotation"] {
-        background-color: rgba(63, 81, 181, 0.15);
+        background-color: ${colors.annotation.bg};
       }
 
       span.writersroom-highlight[data-wr-type="star"] {
-        background-color: rgba(255, 215, 0, 0.25);
+        background-color: ${colors.star.bg};
       }
 
-      .writersroom-highlight:hover,
       span.writersroom-highlight:hover {
-        background-color: rgba(255, 193, 7, 0.3);
+        background-color: ${colors.hover};
       }
 
-      .writersroom-highlight-active,
       span.writersroom-highlight-active {
-        background-color: rgba(255, 193, 7, 0.35);
-        outline: 2px solid rgba(255, 193, 7, 0.6);
+        background-color: ${colors.active.bg};
+        outline: 2px solid ${colors.active.border};
         outline-offset: -2px;
+      }
+
+      /* Pulse animation for jump-to accessibility (preview mode) */
+      span.writersroom-highlight-pulse {
+        animation: writersroom-highlight-pulse 1s ease-out;
       }
 
       .writersroom-highlight-block,
@@ -3852,6 +4446,66 @@ export function buildWritersRoomCss(): string {
         white-space: pre-wrap;
       }
 
+      .writersroom-token-wrapper {
+        padding: 0.45rem 0.9rem 0.2rem;
+      }
+
+      .writersroom-token-ticker {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        background: linear-gradient(115deg, rgba(255, 230, 180, 0.32), rgba(255, 255, 255, 0.05));
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        padding: 0.55rem 0.8rem;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+
+      .writersroom-token-ticker:not(.is-complete) {
+        animation: writersroom-token-glow 2.6s ease-in-out infinite;
+      }
+
+      .writersroom-token-ticker.is-complete {
+        box-shadow: 0 6px 18px rgba(46, 204, 113, 0.28);
+      }
+
+      .writersroom-token-ticker:not(.is-complete):hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.12);
+      }
+
+      .writersroom-token-badge {
+        font-family: var(--font-monospace);
+        font-size: 0.82em;
+        letter-spacing: 0.08em;
+        padding: 0.25rem 0.45rem;
+        border-radius: 4px;
+        background: var(--background-modifier-form-field);
+        color: var(--text-accent);
+        text-transform: uppercase;
+      }
+
+      .writersroom-token-content {
+        display: flex;
+        flex-direction: column;
+        gap: 0.15rem;
+      }
+
+      .writersroom-token-count {
+        font-size: 1.7em;
+        font-weight: 700;
+        color: var(--text-normal);
+        line-height: 1;
+      }
+
+      .writersroom-token-label {
+        font-size: 0.78em;
+        color: var(--text-muted);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+
       .writersroom-sidebar-progress {
         margin: 0.65rem 0.9rem 0.2rem;
         padding: 0.55rem 0.65rem;
@@ -3897,21 +4551,6 @@ export function buildWritersRoomCss(): string {
         line-height: 1.4;
       }
 
-      @keyframes writersroom-progress-pulse {
-        0% {
-          opacity: 0.55;
-          transform: scale(0.9);
-        }
-        50% {
-          opacity: 1;
-          transform: scale(1);
-        }
-        100% {
-          opacity: 0.55;
-          transform: scale(0.9);
-        }
-      }
-
       .writersroom-sidebar-list {
         flex: 1;
         overflow-y: auto;
@@ -3947,6 +4586,22 @@ export function buildWritersRoomCss(): string {
       .writersroom-sidebar-item.is-selected {
         border-left-color: var(--interactive-accent);
         background-color: var(--background-modifier-hover);
+      }
+      
+      .writersroom-sidebar-item.is-collapsed {
+        opacity: 0.6;
+        transition: opacity 0.2s ease;
+      }
+      
+      .writersroom-sidebar-item.is-collapsed:hover {
+        opacity: 0.8;
+      }
+      
+      .writersroom-sidebar-item-collapsed-hint {
+        font-size: 0.75em;
+        color: var(--text-muted);
+        font-style: italic;
+        margin-top: 0.25rem;
       }
 
       .writersroom-sidebar-item-heading {
@@ -3997,6 +4652,17 @@ export function buildWritersRoomCss(): string {
         border-radius: 4px;
         border-left: 3px solid rgba(255, 193, 7, 0.8);
       }
+      
+      .writersroom-sidebar-item-annotation {
+        font-size: 0.8em;
+        color: var(--text-accent);
+        background-color: var(--background-modifier-form-field);
+        padding: 0.4rem 0.5rem;
+        border-radius: 4px;
+        margin-top: 0.35rem;
+        border-left: 3px solid var(--text-accent);
+        font-style: italic;
+      }
 
       .writersroom-sidebar-item-actions {
         display: flex;
@@ -4040,10 +4706,18 @@ class WritersRoomSidebarView extends ItemView {
     sourcePath: null,
     payload: null,
     selectedAnchorId: null,
-    progressLog: []
+    progressLog: [],
+    tokenTicker: null
   };
   private requestButton: HTMLButtonElement | null = null;
   private isRequesting = false;
+  private tokenTickerEl: HTMLElement | null = null;
+  private tokenTickerLabelEl: HTMLElement | null = null;
+  private tokenTickerWrapper: HTMLElement | null = null;
+  private tokenAnimationFrame: number | null = null;
+  private displayedTokenCount = 0;
+  private currentTokenGeneration = -1;
+  private collapsedEdits = new Set<string>(); // Track which edits are collapsed by anchor ID
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
     super(leaf);
@@ -4070,24 +4744,40 @@ class WritersRoomSidebarView extends ItemView {
 
   onClose(): void {
     this.plugin.unregisterSidebar(this);
+    this.stopTokenAnimation(true);
+    this.collapsedEdits.clear();
     this.state = {
       sourcePath: null,
       payload: null,
       selectedAnchorId: null,
-      progressLog: []
+      progressLog: [],
+      tokenTicker: null
     };
     this.requestButton = null;
+    this.displayedTokenCount = 0;
+    this.currentTokenGeneration = -1;
+    this.tokenTickerEl = null;
+    this.tokenTickerLabelEl = null;
   }
 
   setState(state: SidebarState): void {
+    const sourceChanged = this.state.sourcePath !== state.sourcePath;
+    
     this.state = {
       sourcePath: state.sourcePath ?? null,
       payload: state.payload ?? null,
       selectedAnchorId: state.selectedAnchorId ?? null,
       progressLog: state.progressLog
         ? state.progressLog.map((entry) => ({ ...entry }))
-        : []
+        : [],
+      tokenTicker: state.tokenTicker ? { ...state.tokenTicker } : null
     };
+    
+    // Clear collapsed state when switching to a different document
+    if (sourceChanged) {
+      this.collapsedEdits.clear();
+    }
+    
     this.render();
   }
 
@@ -4096,12 +4786,142 @@ class WritersRoomSidebarView extends ItemView {
     this.applyRequestState();
   }
 
+  private stopTokenAnimation(resetCount: boolean): void {
+    if (this.tokenAnimationFrame !== null && typeof window !== "undefined" && typeof window.cancelAnimationFrame === "function") {
+      window.cancelAnimationFrame(this.tokenAnimationFrame);
+    }
+    this.tokenAnimationFrame = null;
+    if (resetCount) {
+      this.displayedTokenCount = 0;
+      this.currentTokenGeneration = -1;
+    }
+  }
+
+  private formatTokenCount(value: number): string {
+    try {
+      return value.toLocaleString();
+    } catch {
+      return String(value);
+    }
+  }
+
+  private updateTokenDisplay(value: number, isComplete: boolean): void {
+    if (this.tokenTickerEl) {
+      const suffix = isComplete ? "" : "+";
+      this.tokenTickerEl.textContent = `${this.formatTokenCount(value)}${suffix}`;
+    }
+
+    if (this.tokenTickerLabelEl) {
+      const baseLabel = this.state.tokenTicker?.label ?? "Token ticker";
+      this.tokenTickerLabelEl.textContent = isComplete
+        ? `${baseLabel} complete!`
+        : `${baseLabel} (and counting...)`;
+    }
+
+    if (this.tokenTickerWrapper) {
+      if (isComplete) {
+        this.tokenTickerWrapper.addClass("is-complete");
+      } else {
+        this.tokenTickerWrapper.removeClass("is-complete");
+      }
+    }
+  }
+
+  private startTokenAnimation(target: number, isComplete: boolean): void {
+    const endValue = Math.max(target, 0);
+
+    if (!this.tokenTickerEl) {
+      this.displayedTokenCount = endValue;
+      return;
+    }
+
+    if (typeof window === "undefined" || typeof window.requestAnimationFrame !== "function") {
+      this.displayedTokenCount = endValue;
+      this.updateTokenDisplay(endValue, isComplete);
+      return;
+    }
+
+    this.stopTokenAnimation(false);
+    const startValue = this.displayedTokenCount;
+
+    if (endValue <= startValue) {
+      this.displayedTokenCount = endValue;
+      this.updateTokenDisplay(endValue, isComplete);
+      return;
+    }
+
+    const range = endValue - startValue;
+    const duration = Math.min(2000, 420 + range * 20);
+    const startTime = typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now();
+
+    const step = (timestamp: number) => {
+      const elapsed = timestamp - startTime;
+      const progress = Math.min(1, duration === 0 ? 1 : elapsed / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const value = Math.max(startValue, Math.round(startValue + range * eased));
+      this.displayedTokenCount = value;
+      this.updateTokenDisplay(value, progress >= 1 ? isComplete : false);
+      if (progress < 1) {
+        this.tokenAnimationFrame = window.requestAnimationFrame(step);
+      } else {
+        this.tokenAnimationFrame = null;
+        this.updateTokenDisplay(endValue, isComplete);
+      }
+    };
+
+    this.tokenAnimationFrame = window.requestAnimationFrame(step);
+  }
+
+  private renderTokenTicker(parent: HTMLElement): void {
+    const tickerState = this.state.tokenTicker;
+    if (!tickerState) {
+      this.currentTokenGeneration = -1;
+      this.displayedTokenCount = 0;
+      this.tokenTickerWrapper = null;
+      this.tokenTickerEl = null;
+      this.tokenTickerLabelEl = null;
+      return;
+    }
+
+    if (tickerState.generation !== this.currentTokenGeneration) {
+      this.displayedTokenCount = 0;
+      this.currentTokenGeneration = tickerState.generation;
+    }
+
+    const wrapper = parent.createDiv({ cls: "writersroom-token-ticker" });
+    if (tickerState.isComplete) {
+      wrapper.addClass("is-complete");
+    }
+
+    wrapper.createDiv({ cls: "writersroom-token-badge", text: tickerState.badge });
+
+    const contentEl = wrapper.createDiv({ cls: "writersroom-token-content" });
+    const countEl = contentEl.createDiv({
+      cls: "writersroom-token-count",
+      text: this.formatTokenCount(this.displayedTokenCount)
+    });
+    const labelEl = contentEl.createDiv({ cls: "writersroom-token-label" });
+
+    this.tokenTickerWrapper = wrapper;
+    this.tokenTickerEl = countEl;
+    this.tokenTickerLabelEl = labelEl;
+
+    this.updateTokenDisplay(this.displayedTokenCount, Boolean(tickerState.isComplete));
+    this.startTokenAnimation(tickerState.target, Boolean(tickerState.isComplete));
+  }
+
   updateSelection(anchorId: string | null): void {
     this.state.selectedAnchorId = anchorId ?? null;
     this.applySelection();
   }
 
   private render(): void {
+    this.stopTokenAnimation(false);
+    this.tokenTickerEl = null;
+    this.tokenTickerLabelEl = null;
+    this.tokenTickerWrapper = null;
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("writersroom-sidebar");
@@ -4146,6 +4966,14 @@ class WritersRoomSidebarView extends ItemView {
         cls: "writersroom-sidebar-summary",
         text: this.state.payload.summary
       });
+    }
+
+    if (this.state.tokenTicker) {
+      const tickerHost = containerEl.createDiv({ cls: "writersroom-token-wrapper" });
+      this.renderTokenTicker(tickerHost);
+    } else {
+      this.currentTokenGeneration = -1;
+      this.displayedTokenCount = 0;
     }
 
     const progressEntries = this.state.progressLog ?? [];
@@ -4199,13 +5027,20 @@ class WritersRoomSidebarView extends ItemView {
 
     edits.forEach((edit, index) => {
       const anchorId = this.plugin.getAnchorForEdit(edit, index);
+      const isSelected = this.state.selectedAnchorId === anchorId;
+      const isCollapsed = this.collapsedEdits.has(anchorId);
+      
       const itemEl = listEl.createDiv({
         cls: "writersroom-sidebar-item",
         attr: { "data-anchor-id": anchorId }
       });
 
-      if (this.state.selectedAnchorId === anchorId) {
+      if (isSelected) {
         itemEl.addClass("is-selected");
+      }
+      
+      if (isCollapsed) {
+        itemEl.addClass("is-collapsed");
       }
 
       itemEl.createDiv({
@@ -4222,94 +5057,112 @@ class WritersRoomSidebarView extends ItemView {
         text: `Line ${edit.line} · ${edit.type}`
       });
 
-      contentEl.createEl("div", {
-        cls: "writersroom-sidebar-item-meta",
-        text: `Category: ${edit.category}`
-      });
-
-      const outputText = typeof edit.output === "string" ? edit.output : null;
-
-      if (edit.type === "annotation") {
-        // For annotations, show the original text as context
+      // If collapsed, only show heading and stop
+      if (isCollapsed) {
         contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-original",
-          text: previewText(edit.original_text)
+          cls: "writersroom-sidebar-item-collapsed-hint",
+          text: "Click to expand"
         });
-        // Show the annotation comment if available
-        if (outputText) {
-          contentEl.createEl("div", {
-            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
-            text: previewText(outputText)
-          });
-        } else {
-          // Show placeholder for legacy annotations without output text
-          contentEl.createEl("div", {
-            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
-            text: "(Annotation comment not available - request new edits to see comments)"
-          });
-        }
-      } else if (edit.type === "star") {
-        contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-original",
-          text: previewText(edit.original_text)
-        });
-
-        if (outputText) {
-          contentEl.createEl("div", {
-            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
-            text: previewText(outputText)
-          });
-        }
       } else {
-        // For additions, replacements, and subtractions, show original snippet
+        // Full expanded view
         contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-original",
-          text: previewText(edit.original_text)
+          cls: "writersroom-sidebar-item-meta",
+          text: `Category: ${edit.category}`
         });
-        // Show the suggested revision if available
-        if (outputText) {
+
+        const outputText = typeof edit.output === "string" ? edit.output : null;
+
+        if (edit.type === "annotation") {
+          // For annotations, show the original text as context
           contentEl.createEl("div", {
-            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
-            text: previewText(outputText)
+            cls: "writersroom-sidebar-item-original",
+            text: previewText(edit.original_text)
           });
+          // Show the annotation comment in full (never truncate editorial comments)
+          if (outputText) {
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
+              text: outputText
+            });
+          } else {
+            // Show placeholder for legacy annotations without output text
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
+              text: "(Annotation comment not available - request new edits to see comments)"
+            });
+          }
+        } else if (edit.type === "star") {
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-original",
+            text: previewText(edit.original_text)
+          });
+
+          // Show star comments in full (never truncate editorial praise)
+          if (outputText) {
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
+              text: outputText
+            });
+          }
+        } else {
+          // For additions, replacements, and subtractions, show original snippet
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-original",
+            text: previewText(edit.original_text)
+          });
+          // Show the suggested revision if available
+          if (outputText) {
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
+              text: previewText(outputText)
+            });
+          }
+          
+          // If this edit has a merged annotation, show it
+          if (edit.annotation) {
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-annotation",
+              text: `💭 ${edit.annotation}`
+            });
+          }
         }
-      }
 
-      const actions: SidebarAction[] = [];
-      const sourcePath = this.state.sourcePath;
+        const actions: SidebarAction[] = [];
+        const sourcePath = this.state.sourcePath;
 
-      if (sourcePath) {
-        const canApply =
-          edit.type === "subtraction" ||
-          ((edit.type === "addition" || edit.type === "replacement") &&
-            typeof edit.output === "string" &&
-            edit.output.length > 0);
+        if (sourcePath) {
+          const canApply =
+            edit.type === "subtraction" ||
+            ((edit.type === "addition" || edit.type === "replacement") &&
+              typeof edit.output === "string" &&
+              edit.output.length > 0);
 
-        if (canApply) {
+          if (canApply) {
+            actions.push({
+              label: "Apply",
+              title: "Apply this suggestion to the note",
+              onClick: () =>
+                this.plugin.applySidebarEdit(sourcePath, anchorId)
+            });
+          }
+
           actions.push({
-            label: "Apply",
-            title: "Apply this suggestion to the note",
+            label: "Jump to",
+            title: "Scroll note to this edit",
             onClick: () =>
-              this.plugin.applySidebarEdit(sourcePath, anchorId)
+              this.plugin.jumpToAnchor(sourcePath, anchorId)
+          });
+
+          actions.push({
+            label: "Resolve",
+            title: "Remove this edit from the list",
+            onClick: () =>
+              this.plugin.resolveSidebarEdit(sourcePath, anchorId)
           });
         }
 
-        actions.push({
-          label: "Jump to",
-          title: "Scroll note to this edit",
-          onClick: () =>
-            this.plugin.jumpToAnchor(sourcePath, anchorId)
-        });
-
-        actions.push({
-          label: "Resolve",
-          title: "Remove this edit from the list",
-          onClick: () =>
-            this.plugin.resolveSidebarEdit(sourcePath, anchorId)
-        });
+        this.renderActions(contentEl, actions);
       }
-
-      this.renderActions(contentEl, actions);
 
       itemEl.addEventListener("click", (event) => {
         event.preventDefault();
@@ -4317,6 +5170,24 @@ class WritersRoomSidebarView extends ItemView {
         if (!this.state.sourcePath) {
           return;
         }
+        
+        // When selecting an edit, collapse all others
+        if (this.state.selectedAnchorId !== anchorId) {
+          // Collapse all edits except the one being selected
+          edits.forEach((e, i) => {
+            const eAnchorId = this.plugin.getAnchorForEdit(e, i);
+            if (eAnchorId !== anchorId) {
+              this.collapsedEdits.add(eAnchorId);
+            } else {
+              this.collapsedEdits.delete(eAnchorId);
+            }
+          });
+        } else {
+          // If clicking the already-selected item, expand all
+          this.collapsedEdits.clear();
+        }
+        
+        // handleSidebarSelection will trigger a re-render via setState
         void this.plugin.handleSidebarSelection(
           this.state.sourcePath,
           anchorId
@@ -4479,6 +5350,61 @@ class WritersRoomSettingTab extends PluginSettingTab {
           });
         text.inputEl.type = "password";
       });
+
+    const colorSchemeDropdownSetting = new Setting(containerEl)
+      .setName("Highlight Color Scheme")
+      .setDesc(
+        "Choose a color scheme for edit highlights. Different schemes improve visibility and accessibility for different visual needs."
+      );
+
+    // Create dropdown manually since addDropdown is not in type definitions
+    const colorDropdown = document.createElement("select");
+    colorDropdown.classList.add("dropdown");
+    colorDropdown.style.width = "100%";
+    
+    const schemes: Array<{ value: ColorScheme; label: string }> = [
+      { value: "default", label: "Default" },
+      { value: "high-contrast", label: "High Contrast" },
+      { value: "colorblind-friendly", label: "Colorblind Friendly" },
+      { value: "muted", label: "Muted (Low Eye Strain)" },
+      { value: "warm", label: "Warm Tones" },
+      { value: "cool", label: "Cool Tones" }
+    ];
+
+    schemes.forEach(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (value === this.plugin.settings.colorScheme) {
+        option.selected = true;
+      }
+      colorDropdown.appendChild(option);
+    });
+
+    colorDropdown.addEventListener("change", async () => {
+      this.plugin.settings.colorScheme = colorDropdown.value as ColorScheme;
+      await this.plugin.saveSettings();
+      this.plugin.updateStyles();
+      this.plugin.refreshEditorHighlights();
+    });
+
+    (colorSchemeDropdownSetting as any).controlEl.appendChild(colorDropdown);
+
+    const audibleFeedbackSetting = new Setting(containerEl)
+      .setName("Audible Feedback")
+      .setDesc(
+        "Play short audio cues (audicons) when performing actions like selecting, applying, or dismissing edits. Helpful for screen reader users and those who prefer audio feedback."
+      );
+
+    const audibleToggle = document.createElement("input");
+    audibleToggle.type = "checkbox";
+    audibleToggle.checked = this.plugin.settings.audibleFeedback;
+    audibleToggle.addEventListener("change", async () => {
+      this.plugin.settings.audibleFeedback = audibleToggle.checked;
+      this.plugin.audiconPlayer?.setEnabled(audibleToggle.checked);
+      await this.plugin.saveSettings();
+    });
+    (audibleFeedbackSetting as any).controlEl.appendChild(audibleToggle);
 
     new Setting(containerEl)
       .setName("Load demo data")

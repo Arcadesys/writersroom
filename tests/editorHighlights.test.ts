@@ -10,7 +10,7 @@ import {
 const { state: cmState, view: cmView } = getCodeMirrorModules();
 const { EditorState } = cmState;
 const { Decoration } = cmView;
-type CMDecorationInstance = ReturnType<typeof Decoration.mark>;
+type CMLineDecoration = ReturnType<typeof Decoration.line>;
 
 describe("Writers Room editor highlights", () => {
   it("exposes CSS that targets CodeMirror editor highlights", () => {
@@ -26,7 +26,7 @@ describe("Writers Room editor highlights", () => {
     expect(css).toMatch(/\[data-wr-type="annotation"\]/);
   });
 
-  it("adds mark decorations with writersroom metadata", () => {
+  it("adds line decorations with writersroom metadata", () => {
     let state = EditorState.create({
       doc: "Example line of text",
       extensions: [writersRoomEditorHighlightsField]
@@ -55,19 +55,21 @@ describe("Writers Room editor highlights", () => {
     state = transaction.state;
 
     const decorations = state.field(writersRoomEditorHighlightsField);
-    let found = false;
+    let captured: { from: number; value: CMLineDecoration } | null = null;
     decorations.between(0, state.doc.length, (from, to, value) => {
-      if (from === 0 && to === 7) {
-        found = true;
-  const decoration = value as CMDecorationInstance;
-        expect(decoration.spec.class).toContain("writersroom-highlight");
-        expect(decoration.spec.attributes?.["data-wr-match"]).toBe("Example");
-        expect(decoration.spec.attributes?.["data-writersroom-anchor"]).toBe(
-          "writersroom-line-1-edit-0"
-        );
+      if (!captured) {
+        captured = { from, value: value as CMLineDecoration };
       }
     });
 
-    expect(found).toBe(true);
+    expect(captured).not.toBeNull();
+    expect(captured?.from).toBe(0);
+    const decoration = captured?.value;
+    expect(decoration?.spec.class).toContain("writersroom-highlight");
+    expect(decoration?.spec.class).toContain("writersroom-type-addition");
+    expect(decoration?.spec.attributes?.["data-wr-match"]).toBe("Example");
+    expect(decoration?.spec.attributes?.["data-writersroom-anchor"]).toBe(
+      "writersroom-line-1-edit-0"
+    );
   });
 });
