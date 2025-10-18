@@ -1,7 +1,65 @@
 declare module "obsidian" {
   export interface App {
     vault: Vault;
+    workspace: Workspace;
   }
+
+  export interface Workspace {
+    on(event: "file-open", callback: (file: TFile | null) => void): EventRef;
+    on(event: string, callback: (...args: any[]) => void): EventRef;
+    getActiveFile(): TFile | null;
+    openLinkText?(path: string, sourcePath: string, newLeaf?: boolean): Promise<void>;
+    getLeavesOfType(viewType: string): WorkspaceLeaf[];
+    getRightLeaf(replace?: boolean): WorkspaceLeaf | null;
+    revealLeaf(leaf: WorkspaceLeaf): Promise<void>;
+    getActiveViewOfType<T extends ItemView>(view: new (...args: any[]) => T): T | null;
+    setActiveLeaf(leaf: WorkspaceLeaf, options?: { focus?: boolean }): void;
+  }
+
+  export class WorkspaceLeaf {
+    view: ItemView;
+    setViewState(state: { type: string; active?: boolean }): Promise<void>;
+  }
+
+  export class ItemView {
+    containerEl: HTMLElement;
+    constructor(leaf: WorkspaceLeaf);
+    getViewType(): string;
+    getDisplayText(): string;
+  }
+
+  export class MarkdownView extends ItemView {
+    editor: Editor;
+    file: TFile;
+    previewMode: MarkdownPreviewRenderer;
+  }
+
+  export class MarkdownPreviewRenderer {
+    containerEl: HTMLElement;
+  }
+
+  export interface Editor {
+    setCursor(pos: EditorPosition): void;
+    scrollIntoView(range: { from: EditorPosition; to: EditorPosition }, center?: boolean): void;
+    getLine(line: number): string;
+  }
+
+  export interface EditorPosition {
+    line: number;
+    ch: number;
+  }
+
+  export interface MarkdownSectionInformation {
+    lineStart: number;
+    lineEnd: number;
+  }
+
+  export interface MarkdownPostProcessorContext {
+    sourcePath: string;
+    getSectionInfo(element: HTMLElement): MarkdownSectionInformation | null;
+  }
+
+  export interface EventRef {}
 
   interface SettingContainerEl extends HTMLElement {
     empty(): void;
@@ -16,6 +74,7 @@ declare module "obsidian" {
   export class TFile extends TAbstractFile {
     path: string;
     basename: string;
+    extension: string;
   }
 
   export class TFolder extends TAbstractFile {
@@ -37,22 +96,40 @@ declare module "obsidian" {
     create(path: string, data: string): Promise<TFile>;
     createFolder(path: string): Promise<TFolder>;
     modify(file: TFile, data: string): Promise<void>;
+    read(file: TFile): Promise<string>;
+    on(event: "rename", callback: (file: TAbstractFile, oldPath: string) => void): EventRef;
+    on(event: string, callback: (...args: any[]) => void): EventRef;
   }
 
   export interface Command {
     id: string;
     name: string;
-    callback: () => void;
+    callback?: () => void;
+    checkCallback?: (checking: boolean) => boolean;
+  }
+
+  export interface PluginManifest {
+    dir?: string;
+    id: string;
+    name: string;
+    version: string;
   }
 
   export class Notice {
     constructor(message: string, timeout?: number);
+    hide(): void;
   }
 
   export class Plugin {
     app: App;
+    manifest: PluginManifest;
     addCommand(command: Command): void;
     addSettingTab(tab: PluginSettingTab): void;
+    registerView(type: string, callback: (leaf: WorkspaceLeaf) => ItemView): void;
+    registerEvent(eventRef: EventRef): void;
+    registerMarkdownPostProcessor(
+      processor: (element: HTMLElement, context: MarkdownPostProcessorContext) => void | Promise<void>
+    ): void;
     loadData<T>(): Promise<T | undefined>;
     saveData(data: unknown): Promise<void>;
   }
