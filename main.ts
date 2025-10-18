@@ -17,8 +17,6 @@ import {
 import { RangeSetBuilder, StateEffect, StateField, EditorState, Facet, Compartment } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, PluginValue } from "@codemirror/view";
 
-import OpenAI from "openai";
-
 import {
   EditEntry,
   EditPayload,
@@ -32,14 +30,10 @@ const WR_VIEW_TYPE = "writersroom-sidebar";
 // Settings interface and defaults (moved here for facet)
 interface WritersRoomSettings {
   apiKey: string;
-  promptId: string;
-  promptVersion: string;
 }
 
 const DEFAULT_SETTINGS: WritersRoomSettings = {
-  apiKey: "",
-  promptId: "pmpt_68ee82bd4d348197bf7620d91cfebde40ff924f946984331",
-  promptVersion: "4"
+  apiKey: ""
 };
 
 // Settings facet for reactive updates across editor extensions
@@ -1851,22 +1845,99 @@ export default class WritersRoomPlugin extends Plugin {
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
     try {
-      const openai = new OpenAI({
-        apiKey: apiKey
+      const systemPrompt = `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
+
+Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will perform before editing. Keep checklist items conceptual, not implementation-level.
+
+---
+
+### EDITING RULES
+- Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
+- Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
+- After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
+- Categorize each edit by one of the following:
+  1. **flow** — smoothness and clarity of sentences
+  2. **rhythm** — pacing and variation in sentence/phrase length
+  3. **sensory** — imagery, tangible physical details
+  4. **punch** — emotional impact or added emphasis
+
+- Create a summary of the edits and the piece itself as if you were a seasoned editor working with a novelist. All responses should include exactly one summary item.
+- Output edits in **normalized JSON** format as detailed below.
+
+FIELD GUIDELINES
+- \`line\`: Input line number corresponding to the edit.
+- \`type\`:
+  - "addition": only provide newly inserted text
+  - "subtraction": output must be null (for removed text)
+  - "annotation": no text is added or deleted; output is a brief bracketed comment or suggestion
+- \`category\`: one of "flow", "rhythm", "sensory", or "punch"
+- \`original_text\`: a snippet (phrase or sentence) of the affected text for context
+- \`output\`:
+  - If type = "addition": only the text being inserted
+  - If type = "subtraction": must be null
+  - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
+
+Malformed, empty, or non-line-separated input should result in a JSON object with an empty \`edits\` array and a \`summary\` explaining the issue. Treat the whole input as a single line (\`line: 1\`) if lines are not separable.
+
+TASK
+Analyze the text below and return your JSON of edits. Do not include commentary or output outside the JSON. Your output must always have a \`summary\` with a brief review by the "editor-in-chief."
+
+OUTPUT: A valid JSON object with these fields:
+- \`edits\`: Array of edit objects, each containing:
+  - \`agent\` (string, always "editor")
+  - \`line\` (integer, starting at 1)
+  - \`type\` ("addition", "subtraction", or "annotation")
+  - \`category\` ("flow", "rhythm", "sensory", or "punch")
+  - \`original_text\` (string, as found in input)
+  - \`output\` (string or null, as appropriate)
+- \`summary\`: (string) Concise review from the "editor-in-chief" evaluating the result (always required)
+
+Malformed or blank input example:
+\`\`\`json
+{
+  "edits": [],
+  "summary": "Input was malformed or blank; no edits performed."
+}
+\`\`\``;
+
+      const fetchImpl: typeof fetch | null =
+        typeof fetch !== "undefined"
+          ? fetch
+          : typeof window !== "undefined" && typeof window.fetch === "function"
+            ? window.fetch.bind(window)
+            : null;
+
+      if (!fetchImpl) {
+        throw new Error("Fetch API is unavailable in this environment.");
+      }
+
+      const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: "gpt-5",
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: noteContents }
+          ]
+        })
       });
 
-      const response = await openai.responses.create({
-        prompt: {
-          id: this.settings.promptId,
-          version: this.settings.promptVersion,
-          variables: {
-            title: file.basename,
-            user_text: noteContents
-          }
-        }
-      });
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
+      }
 
-      const completion = response.output_text ?? "";
+      const parsed = await response.json() as {
+        choices?: Array<{
+          message?: { content?: string };
+        }>;
+      };
+
+      const completion = parsed.choices?.[0]?.message?.content ?? "";
 
       if (typeof completion !== "string" || completion.trim().length === 0) {
         throw new Error("OpenAI response did not include text content.");
@@ -3081,32 +3152,6 @@ class WritersRoomSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         text.inputEl.type = "password";
-      });
-
-    new Setting(containerEl)
-      .setName("Prompt ID")
-      .setDesc("The OpenAI prompt ID to use for generating edits (from the OpenAI Prompt Library).")
-      .addText((text: TextComponent) => {
-        text
-          .setPlaceholder("pmpt_...")
-          .setValue(this.plugin.settings.promptId)
-          .onChange(async (value: string) => {
-            this.plugin.settings.promptId = value.trim();
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(containerEl)
-      .setName("Prompt Version")
-      .setDesc("The version number of the prompt to use.")
-      .addText((text: TextComponent) => {
-        text
-          .setPlaceholder("1")
-          .setValue(this.plugin.settings.promptVersion)
-          .onChange(async (value: string) => {
-            this.plugin.settings.promptVersion = value.trim();
-            await this.plugin.saveSettings();
-          });
       });
 
     new Setting(containerEl)
