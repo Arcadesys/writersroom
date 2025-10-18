@@ -74,7 +74,7 @@ type SelectionOrigin = "highlight" | "sidebar" | "external";
 interface HighlightActivationOptions {
   scroll?: boolean;
   attempts?: number;
-  line?: number;
+  editIndex?: number | null;
 }
 
 interface WritersRoomSettings {
@@ -94,6 +94,8 @@ export default class WritersRoomPlugin extends Plugin {
   private sidebarView: WritersRoomSidebarView | null = null;
   private activeSourcePath: string | null = null;
   private activeAnchorId: string | null = null;
+  private activePayload: EditPayload | null = null;
+  private activeEditIndex: number | null = null;
   private highlightRetryHandle: number | null = null;
   private requestInProgress = false;
 
@@ -319,6 +321,9 @@ export default class WritersRoomPlugin extends Plugin {
 
     this.persistedEdits.set(sourcePath, entry);
     this.editCache.set(sourcePath, payload);
+    if (this.activeSourcePath === sourcePath) {
+      this.activePayload = payload;
+    }
 
     if (options?.persist === false) {
       return;
@@ -335,6 +340,11 @@ export default class WritersRoomPlugin extends Plugin {
     this.editCachePromises.delete(sourcePath);
     if (removed) {
       this.persistStateSafely();
+    }
+    if (this.activeSourcePath === sourcePath) {
+      this.activePayload = null;
+      this.activeEditIndex = null;
+      this.activeAnchorId = null;
     }
   }
 
@@ -355,6 +365,10 @@ export default class WritersRoomPlugin extends Plugin {
     await this.loadSettings();
 
     this.activeSourcePath = this.app.workspace.getActiveFile()?.path ?? null;
+    if (this.activeSourcePath) {
+      const persisted = this.persistedEdits.get(this.activeSourcePath);
+      this.activePayload = persisted?.payload ?? null;
+    }
 
     this.registerView(WR_VIEW_TYPE, (leaf) => new WritersRoomSidebarView(leaf, this));
 
@@ -489,6 +503,12 @@ export default class WritersRoomPlugin extends Plugin {
         this.activeSourcePath = file?.path ?? null;
         if (!this.activeSourcePath) {
           this.activeAnchorId = null;
+          this.activePayload = null;
+          this.activeEditIndex = null;
+        } else {
+          const persisted = this.persistedEdits.get(this.activeSourcePath);
+          this.activePayload = persisted?.payload ?? null;
+          this.activeEditIndex = null;
         }
         void this.refreshSidebarForActiveFile();
       })
@@ -581,12 +601,18 @@ export default class WritersRoomPlugin extends Plugin {
       }
 
       if (anchorEl) {
+        const highlightText = anchorEl.textContent ?? "";
         anchorEl.dataset.wrSource = context.sourcePath;
         anchorEl.dataset.wrIndex = String(item.index);
         anchorEl.dataset.wrLine = String(item.edit.line);
         anchorEl.dataset.wrType = item.edit.type;
         anchorEl.dataset.wrCategory = item.edit.category;
         anchorEl.dataset.wrAnchor = item.anchorId;
+        anchorEl.dataset.wrMatch = highlightText;
+        anchorEl.dataset.wrOriginal = item.edit.original_text;
+        if (typeof item.edit.output === "string") {
+          anchorEl.dataset.wrOutput = item.edit.output;
+        }
         anchorEl.setAttribute("role", "button");
         anchorEl.setAttribute(
           "aria-label",
@@ -790,12 +816,6 @@ export default class WritersRoomPlugin extends Plugin {
   }
 
   async jumpToAnchor(sourcePath: string, anchorId: string): Promise<void> {
-    const info = this.parseAnchorId(anchorId);
-    if (info) {
-      this.focusEditorCursor(info.line);
-      this.scrollPreviewAnchor(anchorId);
-    }
-
     await this.selectEdit(sourcePath, anchorId, "sidebar");
   }
 
@@ -827,11 +847,11 @@ export default class WritersRoomPlugin extends Plugin {
 
     this.activeSourcePath = sourcePath;
     this.activeAnchorId = anchorId;
+    this.activePayload = payload;
 
     const anchorInfo = this.parseAnchorId(anchorId);
-    if (origin !== "highlight" && anchorInfo) {
-      this.focusEditorCursor(anchorInfo.line);
-    }
+    const editIndex = anchorInfo?.index ?? null;
+    this.activeEditIndex = editIndex;
 
     const view = await this.ensureSidebar({
       sourcePath,
@@ -845,7 +865,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.setActiveHighlight(anchorId, {
       scroll: shouldScroll,
       attempts: 0,
-      line: anchorInfo?.line
+      editIndex
     });
   }
 
@@ -897,12 +917,14 @@ export default class WritersRoomPlugin extends Plugin {
       `[data-writersroom-anchor="${anchorId}"]`
     ) as HTMLElement | null;
 
+    const effectiveIndex =
+      options?.editIndex ??
+      this.activeEditIndex ??
+      null;
+
     if (!target) {
       if (options?.scroll) {
-        this.scrollPreviewAnchor(anchorId);
-      }
-      if (options?.scroll && typeof options.line === "number") {
-        this.focusEditorCursor(options.line);
+        this.scrollPreviewAnchor(anchorId, null, true);
       }
       const attempts = options?.attempts ?? 0;
       if (attempts < 5 && typeof window !== "undefined") {
@@ -910,17 +932,29 @@ export default class WritersRoomPlugin extends Plugin {
           this.setActiveHighlight(anchorId, {
             scroll: options?.scroll,
             attempts: attempts + 1,
-            line: options?.line
+            editIndex: effectiveIndex
           });
         }, 180);
       }
       return;
     }
 
+    const indexFromDataset = Number(target.dataset.wrIndex);
+    const resolvedIndex = Number.isFinite(indexFromDataset)
+      ? indexFromDataset
+      : effectiveIndex;
+
     target.classList.add("writersroom-highlight-active");
 
+    const smoothScroll = options?.scroll ?? false;
+    this.scrollEditorsToAnchor(
+      target,
+      anchorId,
+      resolvedIndex ?? null,
+      smoothScroll
+    );
+
     if (options?.scroll) {
-      this.scrollEditorsToAnchor(target, anchorId, options?.line);
       target.scrollIntoView({ behavior: "smooth", block: "center" });
     }
 
@@ -931,63 +965,145 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private focusEditorCursor(lineNumber: number, attempt = 0): void {
-    if (!Number.isFinite(lineNumber)) {
-      return;
-    }
-
-    const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!editorView) {
-      if (attempt < 5 && typeof window !== "undefined") {
-        window.setTimeout(() => this.focusEditorCursor(lineNumber, attempt + 1), 160);
-      }
-      return;
-    }
-
-    const editorLine = Math.max(0, Math.floor(lineNumber - 1));
-    const position = { line: editorLine, ch: 0 } as const;
-
-    try {
-      const editorAny = editorView.editor as unknown as {
-        scrollIntoView?: (range: { from: typeof position; to: typeof position }, center?: boolean) => void;
-        focus?: () => void;
-      };
-
-      if (typeof editorAny.scrollIntoView === "function") {
-        editorAny.scrollIntoView({ from: position, to: position }, true);
-      }
-
-      editorView.editor.setCursor(position);
-
-      if (typeof editorAny.focus === "function") {
-        editorAny.focus();
-      }
-    } catch (error) {
-      this.logWarn("Failed to focus editor on requested line.", {
-        line: lineNumber,
-        error
-      });
-    }
-  }
-
   private scrollEditorsToAnchor(
     target: HTMLElement,
     anchorId: string,
-    fallbackLine?: number
+    editIndex: number | null,
+    smooth: boolean
   ): void {
-    const lineAttr = target.dataset.wrLine;
-    const lineNumber = lineAttr ? Number(lineAttr) : fallbackLine ?? NaN;
+    const editorView = this.app.workspace.getActiveViewOfType(MarkdownView);
+    let lineNumber = Number(target.dataset.wrLine);
 
-    if (Number.isFinite(lineNumber)) {
-      this.focusEditorCursor(lineNumber as number);
+    if (!Number.isFinite(lineNumber) && editIndex !== null && this.activePayload) {
+      const edit = this.activePayload.edits[editIndex];
+      if (edit) {
+        lineNumber = edit.line;
+      }
     }
 
-    this.scrollPreviewAnchor(anchorId, target);
+    if (editorView && Number.isFinite(lineNumber)) {
+      const leaf = editorView.leaf;
+      if (leaf && typeof this.app.workspace.setActiveLeaf === "function") {
+        this.app.workspace.setActiveLeaf(leaf, { focus: true });
+      }
+
+      const editorAny = editorView.editor as unknown as {
+        getLine?: (line: number) => string;
+        scrollIntoView?: (
+          range: { from: { line: number; ch: number }; to: { line: number; ch: number } },
+          center?: boolean
+        ) => void;
+        focus?: () => void;
+        cm?: {
+          state?: { doc?: { line?: (line: number) => { from: number; length: number } | undefined } };
+          dispatch?: (input: unknown) => void;
+          scrollIntoView?: (pos: number, opts?: { y?: "center" | "start" | "end"; x?: "center" | "start" | "end" }) => void;
+        };
+      };
+
+      const editorLine = Math.max(0, Math.floor(lineNumber - 1));
+      let column = 0;
+
+      const lineText =
+        typeof editorAny.getLine === "function"
+          ? editorAny.getLine(editorLine)
+          : undefined;
+
+      const edit =
+        editIndex !== null && this.activePayload
+          ? this.activePayload.edits[editIndex] ?? null
+          : null;
+
+      const candidateValues = new Set<string>();
+      const addCandidate = (value: string | null | undefined) => {
+        if (typeof value !== "string") {
+          return;
+        }
+        if (!value.length) {
+          return;
+        }
+        candidateValues.add(value);
+        const trimmed = value.trim();
+        if (trimmed && trimmed !== value) {
+          candidateValues.add(trimmed);
+        }
+        const collapsed = value.replace(/\s+/g, " ").trim();
+        if (collapsed && !candidateValues.has(collapsed)) {
+          candidateValues.add(collapsed);
+        }
+      };
+
+      addCandidate(target.dataset.wrMatch);
+      addCandidate(target.textContent ?? "");
+      addCandidate(target.dataset.wrOriginal);
+      addCandidate(target.dataset.wrOutput);
+      if (edit) {
+        addCandidate(edit.original_text);
+        if (typeof edit.output === "string") {
+          addCandidate(edit.output);
+        }
+      }
+
+      if (typeof lineText === "string" && candidateValues.size > 0) {
+        for (const candidate of candidateValues) {
+          const index = lineText.indexOf(candidate);
+          if (index !== -1) {
+            column = index;
+            break;
+          }
+        }
+      }
+
+      const position = { line: editorLine, ch: Math.max(0, column) };
+
+      try {
+        editorView.editor.setCursor(position);
+
+        if (typeof editorAny.scrollIntoView === "function") {
+          editorAny.scrollIntoView({ from: position, to: position }, true);
+        }
+
+        const cmView = editorAny.cm;
+        if (cmView) {
+          try {
+            const docLine =
+              cmView.state?.doc?.line?.(Math.max(1, editorLine + 1)) ?? null;
+            if (docLine) {
+              const offset = Math.min(docLine.length, Math.max(0, column));
+              const pos = docLine.from + offset;
+              if (typeof cmView.scrollIntoView === "function") {
+                cmView.scrollIntoView(pos, { y: "center" });
+              }
+              cmView.dispatch?.({ selection: { anchor: pos } } as unknown);
+            }
+          } catch (cmError) {
+            this.logWarn("Failed to scroll CodeMirror view for highlight.", {
+              anchorId,
+              error: cmError
+            });
+          }
+        }
+
+        if (typeof editorAny.focus === "function") {
+          editorAny.focus();
+        }
+      } catch (error) {
+        this.logWarn("Failed to position editor cursor for highlight.", {
+          anchorId,
+          line: position.line,
+          column: position.ch,
+          error
+        });
+      }
+    }
+
+    this.scrollPreviewAnchor(anchorId, target, smooth);
   }
 
   private scrollPreviewAnchor(
     anchorId: string,
-    existingTarget?: HTMLElement | null
+    existingTarget?: HTMLElement | null,
+    smooth = true
   ): void {
     if (!anchorId || typeof document === "undefined") {
       return;
@@ -1014,6 +1130,7 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     const scrollContainer = this.findScrollableAncestor(target, previewContainer);
+    const behavior = smooth ? "smooth" : "auto";
 
     if (scrollContainer) {
       const containerRect = scrollContainer.getBoundingClientRect();
@@ -1021,12 +1138,12 @@ export default class WritersRoomPlugin extends Plugin {
       const offset = targetRect.top - containerRect.top - containerRect.height / 2;
 
       if (typeof scrollContainer.scrollBy === "function") {
-        scrollContainer.scrollBy({ top: offset, left: 0, behavior: "smooth" });
+        scrollContainer.scrollBy({ top: offset, left: 0, behavior });
       } else if (typeof scrollContainer.scrollTo === "function") {
         scrollContainer.scrollTo({
           top: scrollContainer.scrollTop + offset,
           left: scrollContainer.scrollLeft,
-          behavior: "smooth"
+          behavior
         });
       } else {
         scrollContainer.scrollTop += offset;
@@ -1036,7 +1153,7 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     if (typeof target.scrollIntoView === "function") {
-      target.scrollIntoView({ behavior: "smooth", block: "center" });
+      target.scrollIntoView({ behavior, block: "center" });
     }
   }
 
@@ -1453,6 +1570,7 @@ export default class WritersRoomPlugin extends Plugin {
         ? await this.getEditPayloadForSource(this.activeSourcePath)
         : null;
 
+      this.activePayload = payload;
       this.sidebarView.setState({
         sourcePath: this.activeSourcePath,
         payload,
@@ -1684,10 +1802,25 @@ export default class WritersRoomPlugin extends Plugin {
       }
 
       .writersroom-sidebar-item {
+        display: flex;
+        gap: 0.75rem;
+        align-items: flex-start;
         padding: 0.55rem 0.9rem;
         border-left: 3px solid transparent;
         cursor: pointer;
         transition: background-color 0.2s ease, border-color 0.2s ease;
+      }
+
+      .writersroom-sidebar-item-icon {
+        flex: 0 0 auto;
+        font-size: 1.1em;
+        line-height: 1;
+        margin-top: 0.15rem;
+      }
+
+      .writersroom-sidebar-item-content {
+        flex: 1 1 auto;
+        min-width: 0;
       }
 
       .writersroom-sidebar-item:hover {
@@ -1711,10 +1844,18 @@ export default class WritersRoomPlugin extends Plugin {
         text-transform: capitalize;
       }
 
+      .writersroom-sidebar-item-original {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        white-space: pre-wrap;
+        margin-bottom: 0.35rem;
+      }
+
       .writersroom-sidebar-item-snippet {
         font-size: 0.85em;
         color: var(--text-normal);
         white-space: pre-wrap;
+        margin-top: 0.25rem;
       }
 
       .writersroom-sidebar-item-actions {
@@ -1781,6 +1922,8 @@ export default class WritersRoomPlugin extends Plugin {
         this.removePersistedEdit(sourcePath);
         if (this.activeSourcePath === sourcePath) {
           this.activeAnchorId = null;
+          this.activePayload = null;
+          this.activeEditIndex = null;
           void this.refreshSidebarForActiveFile();
         }
       }
@@ -1792,6 +1935,8 @@ export default class WritersRoomPlugin extends Plugin {
       if (this.activeSourcePath === file.path) {
         this.activeSourcePath = null;
         this.activeAnchorId = null;
+        this.activePayload = null;
+        this.activeEditIndex = null;
         void this.refreshSidebarForActiveFile();
       }
     }
@@ -1806,6 +1951,9 @@ export default class WritersRoomPlugin extends Plugin {
           entry.editsPath = file.path;
           entry.updatedAt = Date.now();
           entry.hash = this.computePayloadHash(entry.payload);
+          if (this.activeSourcePath === sourcePath) {
+            this.activePayload = entry.payload;
+          }
           this.persistStateSafely();
         }
       }
@@ -1829,6 +1977,7 @@ export default class WritersRoomPlugin extends Plugin {
         this.editCachePromises.delete(file.path);
         if (this.activeSourcePath === oldPath) {
           this.activeSourcePath = file.path;
+          this.activePayload = entry.payload;
         }
         this.persistStateSafely();
       } else {
@@ -2089,6 +2238,9 @@ class WritersRoomSidebarView extends ItemView {
       return;
     }
 
+    const previewText = (value: string): string =>
+      value.length > 160 ? `${value.slice(0, 157).trimEnd()}…` : value;
+
     edits.forEach((edit, index) => {
       const anchorId = this.plugin.buildAnchorId(edit.line, index);
       const itemEl = listEl.createDiv({
@@ -2100,26 +2252,36 @@ class WritersRoomSidebarView extends ItemView {
         itemEl.addClass("is-selected");
       }
 
-      itemEl.createEl("div", {
+      itemEl.createDiv({
+        cls: "writersroom-sidebar-item-icon",
+        text: this.getEditTypeIcon(edit.type)
+      });
+
+      const contentEl = itemEl.createDiv({
+        cls: "writersroom-sidebar-item-content"
+      });
+
+      contentEl.createEl("div", {
         cls: "writersroom-sidebar-item-heading",
         text: `Line ${edit.line} · ${edit.type}`
       });
 
-      itemEl.createEl("div", {
+      contentEl.createEl("div", {
         cls: "writersroom-sidebar-item-meta",
         text: `Category: ${edit.category}`
       });
 
-      const snippetSource = edit.output ?? edit.original_text;
-      const snippet =
-        snippetSource.length > 160
-          ? `${snippetSource.slice(0, 157).trimEnd()}…`
-          : snippetSource;
-
-      itemEl.createEl("div", {
-        cls: "writersroom-sidebar-item-snippet",
-        text: snippet
+      contentEl.createEl("div", {
+        cls: "writersroom-sidebar-item-original",
+        text: previewText(edit.original_text)
       });
+
+      if (edit.output) {
+        contentEl.createEl("div", {
+          cls: "writersroom-sidebar-item-snippet",
+          text: previewText(edit.output)
+        });
+      }
 
       const actions: SidebarAction[] = [];
       if (this.state.sourcePath) {
@@ -2131,7 +2293,7 @@ class WritersRoomSidebarView extends ItemView {
         });
       }
 
-      this.renderActions(itemEl, actions);
+      this.renderActions(contentEl, actions);
 
       itemEl.addEventListener("click", (event) => {
         event.preventDefault();
@@ -2147,6 +2309,19 @@ class WritersRoomSidebarView extends ItemView {
     });
 
     this.applySelection();
+  }
+
+  private getEditTypeIcon(type: EditEntry["type"]): string {
+    switch (type) {
+      case "addition":
+        return "➕";
+      case "subtraction":
+        return "❌";
+      case "annotation":
+        return "💬";
+      default:
+        return "?";
+    }
   }
 
   private renderActions(container: HTMLElement, actions: SidebarAction[]): void {

@@ -13,6 +13,7 @@ declare module "obsidian" {
     getRightLeaf(replace?: boolean): WorkspaceLeaf | null;
     revealLeaf(leaf: WorkspaceLeaf): Promise<void>;
     getActiveViewOfType<T extends ItemView>(view: new (...args: any[]) => T): T | null;
+    setActiveLeaf(leaf: WorkspaceLeaf, options?: { focus?: boolean }): void;
   }
 
   export class WorkspaceLeaf {
@@ -40,6 +41,7 @@ declare module "obsidian" {
   export interface Editor {
     setCursor(pos: EditorPosition): void;
     scrollIntoView(range: { from: EditorPosition; to: EditorPosition }, center?: boolean): void;
+    getLine(line: number): string;
   }
 
   export interface EditorPosition {
