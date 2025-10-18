@@ -1500,23 +1500,6 @@ export default class WritersRoomPlugin extends Plugin {
       this.activeEditIndex ??
       null;
 
-    if (!target) {
-      if (options?.scroll) {
-        this.scrollPreviewAnchor(anchorId, null, true);
-      }
-      const attempts = options?.attempts ?? 0;
-      if (attempts < 5 && typeof window !== "undefined") {
-        this.highlightRetryHandle = window.setTimeout(() => {
-          this.setActiveHighlight(anchorId, {
-            scroll: options?.scroll,
-            attempts: attempts + 1,
-            editIndex: effectiveIndex
-          });
-        }, 180);
-      }
-      return;
-    }
-
     const indexFromDataset = Number(target?.dataset?.wrIndex);
     const resolvedIndex = Number.isFinite(indexFromDataset)
       ? indexFromDataset
@@ -1571,14 +1554,14 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     const payload = this.activePayload;
-    const edit =
+    const resolvedEdit =
       resolvedIndex !== null && payload
         ? payload.edits[resolvedIndex] ?? null
         : null;
 
     let lineNumber = Number(target?.dataset?.wrLine);
-    if (!Number.isFinite(lineNumber) && edit) {
-      lineNumber = edit.line;
+    if (!Number.isFinite(lineNumber) && resolvedEdit) {
+      lineNumber = resolvedEdit.line;
     }
     if (!Number.isFinite(lineNumber) && anchorInfo?.line) {
       lineNumber = anchorInfo.line;
@@ -1614,11 +1597,6 @@ export default class WritersRoomPlugin extends Plugin {
           ? editorAny.getLine(editorLine)
           : undefined;
 
-      const edit =
-        editIndex !== null && this.activePayload
-          ? this.activePayload.edits[editIndex] ?? null
-          : null;
-
       const candidateValues = new Set<string>();
       const addCandidate = (value: string | null | undefined) => {
         if (typeof value !== "string") {
@@ -1642,10 +1620,10 @@ export default class WritersRoomPlugin extends Plugin {
       addCandidate(target?.textContent ?? "");
       addCandidate(target?.dataset?.wrOriginal);
       addCandidate(target?.dataset?.wrOutput);
-      if (edit) {
-        addCandidate(edit.original_text);
-        if (typeof edit.output === "string") {
-          addCandidate(edit.output);
+      if (resolvedEdit) {
+        addCandidate(resolvedEdit.original_text);
+        if (typeof resolvedEdit.output === "string") {
+          addCandidate(resolvedEdit.output);
         }
       }
 
