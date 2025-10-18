@@ -17,6 +17,8 @@ import {
 import { RangeSetBuilder, StateEffect, StateField, EditorState, Facet, Compartment } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, PluginValue } from "@codemirror/view";
 
+import OpenAI from "openai";
+
 import {
   EditEntry,
   EditPayload,
@@ -30,10 +32,14 @@ const WR_VIEW_TYPE = "writersroom-sidebar";
 // Settings interface and defaults (moved here for facet)
 interface WritersRoomSettings {
   apiKey: string;
+  promptId: string;
+  promptVersion: string;
 }
 
 const DEFAULT_SETTINGS: WritersRoomSettings = {
-  apiKey: ""
+  apiKey: "",
+  promptId: "pmpt_68ee82bd4d348197bf7620d91cfebde40ff924f946984331",
+  promptVersion: "4"
 };
 
 // Settings facet for reactive updates across editor extensions
@@ -1057,9 +1063,10 @@ export default class WritersRoomPlugin extends Plugin {
         return;
       }
 
-      if (!lineInfo || lineInfo.from >= lineInfo.to) {
-        this.logWarn(
-          `Line ${lineNumber} has invalid range (from: ${lineInfo?.from}, to: ${lineInfo?.to})`
+      // Skip empty lines - mark decorations require non-zero ranges with content
+      if (!lineInfo || lineInfo.from >= lineInfo.to || lineInfo.text.trim().length === 0) {
+        this.logInfo(
+          `Skipping line ${lineNumber} - empty or no content to highlight`
         );
         return;
       }
@@ -1844,67 +1851,22 @@ export default class WritersRoomPlugin extends Plugin {
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
     try {
-      const instructions =
-        "You are the Writers Room editorial board. Review the markdown document provided and return a JSON object with a 'summary' and an 'edits' array. " +
-        "Each edit must include agent 'editor', a 1-based line number, type of 'addition', 'subtraction', or 'annotation', category of 'flow', 'rhythm', 'sensory', or 'punch', the original_text from the source, and output which may be a revised string or null for annotations. " +
-        "Respond with valid JSON only. Do not include commentary outside the JSON object.";
-
-      const userPrompt = `Title: ${file.basename}\n\nMarkdown:\n\n${noteContents}`;
-
-      const fetchImpl: typeof fetch | null =
-        typeof fetch !== "undefined"
-          ? fetch
-          : typeof window !== "undefined" && typeof window.fetch === "function"
-            ? window.fetch.bind(window)
-            : null;
-
-      if (!fetchImpl) {
-        throw new Error("Fetch API is unavailable in this environment.");
-      }
-
-      const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          temperature: 0.3,
-          messages: [
-            { role: "system", content: instructions },
-            { role: "user", content: userPrompt }
-          ]
-        })
+      const openai = new OpenAI({
+        apiKey: apiKey
       });
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
-      }
+      const response = await openai.responses.create({
+        prompt: {
+          id: this.settings.promptId,
+          version: this.settings.promptVersion,
+          variables: {
+            title: file.basename,
+            user_text: noteContents
+          }
+        }
+      });
 
-      const json = await response.json() as {
-        choices?: Array<{
-          message?: { content?: string | Array<{ text?: string }> };
-        }>;
-      };
-
-      let completion = json.choices?.[0]?.message?.content ?? "";
-
-      if (Array.isArray(completion)) {
-        completion = completion
-          .map((part: unknown) => {
-            if (typeof part === "string") {
-              return part;
-            }
-            if (part && typeof part === "object" && "text" in part) {
-              const value = (part as { text?: string }).text;
-              return typeof value === "string" ? value : "";
-            }
-            return "";
-          })
-          .join("\n");
-      }
+      const completion = response.output_text ?? "";
 
       if (typeof completion !== "string" || completion.trim().length === 0) {
         throw new Error("OpenAI response did not include text content.");
@@ -2713,6 +2675,15 @@ export function buildWritersRoomCss(): string {
         margin-top: 0.25rem;
       }
 
+      .writersroom-sidebar-annotation-text {
+        font-style: italic;
+        color: var(--text-accent);
+        background-color: var(--background-modifier-form-field);
+        padding: 0.4rem 0.5rem;
+        border-radius: 4px;
+        border-left: 3px solid var(--text-accent);
+      }
+
       .writersroom-sidebar-item-actions {
         display: flex;
         flex-wrap: wrap;
@@ -2906,16 +2877,38 @@ class WritersRoomSidebarView extends ItemView {
         text: `Category: ${edit.category}`
       });
 
-      contentEl.createEl("div", {
-        cls: "writersroom-sidebar-item-original",
-        text: previewText(edit.original_text)
-      });
-
-      if (edit.output) {
+      if (edit.type === "annotation") {
+        // For annotations, show the original text as context
         contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-snippet",
-          text: previewText(edit.output)
+          cls: "writersroom-sidebar-item-original",
+          text: previewText(edit.original_text)
         });
+        // Show the annotation comment if available
+        if (edit.output) {
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
+            text: previewText(edit.output)
+          });
+        } else {
+          // Show placeholder for legacy annotations without output text
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
+            text: "(Annotation comment not available - request new edits to see comments)"
+          });
+        }
+      } else {
+        // For additions/subtractions, show original
+        contentEl.createEl("div", {
+          cls: "writersroom-sidebar-item-original",
+          text: previewText(edit.original_text)
+        });
+        // Show the suggested revision if available
+        if (edit.output) {
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-snippet",
+            text: previewText(edit.output)
+          });
+        }
       }
 
       const actions: SidebarAction[] = [];
@@ -3088,6 +3081,32 @@ class WritersRoomSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
         text.inputEl.type = "password";
+      });
+
+    new Setting(containerEl)
+      .setName("Prompt ID")
+      .setDesc("The OpenAI prompt ID to use for generating edits (from the OpenAI Prompt Library).")
+      .addText((text: TextComponent) => {
+        text
+          .setPlaceholder("pmpt_...")
+          .setValue(this.plugin.settings.promptId)
+          .onChange(async (value: string) => {
+            this.plugin.settings.promptId = value.trim();
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("Prompt Version")
+      .setDesc("The version number of the prompt to use.")
+      .addText((text: TextComponent) => {
+        text
+          .setPlaceholder("1")
+          .setValue(this.plugin.settings.promptVersion)
+          .onChange(async (value: string) => {
+            this.plugin.settings.promptVersion = value.trim();
+            await this.plugin.saveSettings();
+          });
       });
 
     new Setting(containerEl)
