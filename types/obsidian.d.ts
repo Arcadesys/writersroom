@@ -42,6 +42,10 @@ declare module "obsidian" {
     setCursor(pos: EditorPosition): void;
     scrollIntoView(range: { from: EditorPosition; to: EditorPosition }, center?: boolean): void;
     getLine(line: number): string;
+    getValue(): string;
+    replaceRange(text: string, from: EditorPosition, to?: EditorPosition): void;
+    posToOffset?(pos: EditorPosition): number;
+    offsetToPos(offset: number): EditorPosition;
   }
 
   export interface EditorPosition {

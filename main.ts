@@ -1,6 +1,7 @@
 import {
   App,
   MarkdownPostProcessorContext,
+  Editor,
   ItemView,
   MarkdownView,
   Notice,
@@ -196,6 +197,7 @@ import {
   EditEntry,
   EditPayload,
   ValidationError,
+  createEditAnchorId,
   parseEditPayload,
   parseEditPayloadFromString
 } from "./editParser";
@@ -364,10 +366,18 @@ type StoredEditRecord = {
   hash?: string;
 };
 
+type SidebarProgressTone = "info" | "active" | "success" | "error";
+
+interface SidebarProgressEntry {
+  message: string;
+  tone: SidebarProgressTone;
+}
+
 interface SidebarState {
   sourcePath: string | null;
   payload: EditPayload | null;
   selectedAnchorId?: string | null;
+  progressLog?: SidebarProgressEntry[];
 }
 
 interface SidebarAction {
@@ -399,6 +409,13 @@ export default class WritersRoomPlugin extends Plugin {
   private highlightRetryHandle: number | null = null;
   private editorHighlightState = new WeakMap<CMEditorView, string>();
   private requestInProgress = false;
+  private staleEditSources = new Set<string>();
+  private pendingAnchorResolutions = new Set<string>();
+  private requestProgressSource: string | null = null;
+  private requestProgressEntries: SidebarProgressEntry[] = [];
+  private requestProgressTimer: number | null = null;
+  private requestProgressMessageIndex = -1;
+  private requestProgressActiveLabel: string | null = null;
 
   private log(
     level: "debug" | "info" | "warn" | "error",
@@ -636,18 +653,74 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private removePersistedEdit(sourcePath: string): void {
+  private removePersistedEdit(
+    sourcePath: string,
+    options?: { cacheValue?: EditPayload | null; suppressRefresh?: boolean }
+  ): void {
     const removed = this.persistedEdits.delete(sourcePath);
-    this.editCache.delete(sourcePath);
+
+    if (options && "cacheValue" in options) {
+      this.editCache.set(sourcePath, options.cacheValue ?? null);
+    } else {
+      this.editCache.delete(sourcePath);
+    }
+
     this.editCachePromises.delete(sourcePath);
+
     if (removed) {
       this.persistStateSafely();
     }
+
     if (this.activeSourcePath === sourcePath) {
-      this.activePayload = null;
+      this.activePayload = options?.cacheValue ?? null;
       this.activeEditIndex = null;
       this.activeAnchorId = null;
+      if (!options?.suppressRefresh) {
+        this.refreshEditorHighlights();
+      }
+    }
+  }
+
+  private markEditsAsStale(sourcePath: string): void {
+    if (this.staleEditSources.has(sourcePath)) {
+      return;
+    }
+
+    this.staleEditSources.add(sourcePath);
+    this.logWarn("Detected stale Writers Room edits; clearing cached data.", {
+      sourcePath
+    });
+
+    const existing = this.persistedEdits.get(sourcePath);
+    const editsPath = existing?.editsPath ?? this.getEditsPathForSource(sourcePath);
+
+    this.removePersistedEdit(sourcePath, {
+      cacheValue: null,
+      suppressRefresh: true
+    });
+
+    if (editsPath) {
+      void this.deleteFileIfExists(editsPath);
+    }
+
+    const finalize = () => {
+      this.staleEditSources.delete(sourcePath);
+      if (this.activeSourcePath === sourcePath) {
+        this.activePayload = null;
+        this.activeAnchorId = null;
+        this.activeEditIndex = null;
+      }
+      void this.refreshSidebarForActiveFile();
       this.refreshEditorHighlights();
+      new Notice(
+        "Writers Room edits were cleared because the note changed substantially. Request new edits to refresh suggestions."
+      );
+    };
+
+    if (typeof window !== "undefined" && typeof window.setTimeout === "function") {
+      window.setTimeout(finalize, 0);
+    } else {
+      finalize();
     }
   }
 
@@ -811,6 +884,39 @@ export default class WritersRoomPlugin extends Plugin {
     await vault.create(vaultPath, contents);
   }
 
+  private async deleteFileIfExists(vaultPath: string): Promise<void> {
+    const vault = this.getVault();
+    const adapter = vault.adapter as typeof vault.adapter & {
+      remove?: (path: string) => Promise<void>;
+    };
+
+    try {
+      const exists = await adapter.exists(vaultPath);
+      if (!exists) {
+        return;
+      }
+
+      if (typeof adapter.remove === "function") {
+        await adapter.remove(vaultPath);
+        return;
+      }
+
+      const abstract = vault.getAbstractFileByPath(vaultPath);
+      const deletable = (vault as unknown as {
+        delete?: (file: TAbstractFile) => Promise<void>;
+      }).delete;
+
+      if (abstract && typeof deletable === "function") {
+        await deletable.call(vault, abstract);
+      }
+    } catch (error) {
+      this.logWarn("Failed to remove outdated Writers Room edits file.", {
+        vaultPath,
+        error
+      });
+    }
+  }
+
   onunload(): void {
     if (this.styleEl?.parentElement) {
       this.styleEl.parentElement.removeChild(this.styleEl);
@@ -819,6 +925,11 @@ export default class WritersRoomPlugin extends Plugin {
     this.clearHighlightRetry();
     this.clearEditorHighlights();
     this.clearEditCache();
+    this.cancelRequestProgressTimer();
+    this.requestProgressEntries = [];
+    this.requestProgressSource = null;
+    this.requestProgressActiveLabel = null;
+    this.requestProgressMessageIndex = -1;
   }
 
   private registerHighlighting(): void {
@@ -893,7 +1004,7 @@ export default class WritersRoomPlugin extends Plugin {
     const decoratedEdits: DecoratedEdit[] = payload.edits.map((edit, index) => ({
       edit,
       index,
-      anchorId: this.buildAnchorId(edit.line, index)
+      anchorId: this.getAnchorForEdit(edit, index)
     }));
 
     for (const item of decoratedEdits) {
@@ -921,7 +1032,8 @@ export default class WritersRoomPlugin extends Plugin {
           wrType: item.edit.type,
           wrCategory: item.edit.category,
           wrIndex: String(item.index),
-          wrSource: context.sourcePath
+          wrSource: context.sourcePath,
+          wrAnchor: item.anchorId
         },
         title: `Edit ${item.edit.type} (${item.edit.category})`
       };
@@ -999,6 +1111,7 @@ export default class WritersRoomPlugin extends Plugin {
           sourcePath: context.sourcePath,
           candidates: Array.from(targetValues).slice(0, 4)
         });
+        this.resolveMissingAnchors(context.sourcePath, [item.anchorId]);
       }
     }
   }
@@ -1190,53 +1303,86 @@ export default class WritersRoomPlugin extends Plugin {
       return specs;
     }
 
+    const docText = typeof doc.toString === "function" ? doc.toString() : "";
     const totalLines = doc.lines;
+    const missingAnchors: string[] = [];
 
     payload.edits.forEach((edit, index) => {
-      const anchorId = this.buildAnchorId(edit.line, index);
+      const anchorId = this.getAnchorForEdit(edit, index);
       const classList = [...this.getHighlightClasses(edit)];
       if (activeAnchorId === anchorId) {
         classList.push("writersroom-highlight-active");
       }
 
-      // Validate line number
-      const lineNumber = Math.max(1, edit.line);
-      if (lineNumber > totalLines) {
-        this.logWarn(
-          `Edit references line ${lineNumber} but document only has ${totalLines} lines. Skipping.`
-        );
-        return;
-      }
+      let from: number | null = null;
+      let to: number | null = null;
+      let matchText: string | null = null;
+      let resolvedLineNumber = edit.line;
 
-      let lineInfo: { from: number; to: number; text: string } | null = null;
-      
-      try {
-        const docLine = doc.line(lineNumber);
-        if (docLine) {
-          lineInfo = {
-            from: docLine.from,
-            to: docLine.to,
-            text: docLine.text || ""
-          };
+      if (docText) {
+        const range = this.findEditRangeInText(docText, edit);
+        if (range && Number.isFinite(range.start) && Number.isFinite(range.end) && range.start < range.end) {
+          from = range.start;
+          to = range.end;
+          matchText = docText.slice(range.start, range.end);
+          try {
+            const lineInfo = doc.lineAt(range.start);
+            resolvedLineNumber = lineInfo.number;
+          } catch {
+            // ignore line resolution errors and keep original line number
+          }
         }
-      } catch (error) {
-        this.logWarn(`Failed to get line ${lineNumber} for highlight`, error);
+      }
+
+      if (from === null || to === null) {
+        const lineNumber = Math.max(1, edit.line);
+        if (lineNumber > totalLines) {
+          this.logWarn(
+            `Edit references line ${lineNumber} but document only has ${totalLines} lines. Skipping.`
+          );
+          missingAnchors.push(anchorId);
+          return;
+        }
+
+        try {
+          const docLine = doc.line(lineNumber);
+          if (docLine && docLine.from < docLine.to && docLine.text.trim().length > 0) {
+            from = docLine.from;
+            to = docLine.to;
+            matchText = docLine.text;
+            resolvedLineNumber = docLine.number;
+          } else {
+            this.logInfo(
+              `Skipping line ${lineNumber} - empty or no content to highlight`
+            );
+            missingAnchors.push(anchorId);
+            return;
+          }
+        } catch (error) {
+          this.logWarn(`Failed to get line ${lineNumber} for highlight`, error);
+          missingAnchors.push(anchorId);
+          return;
+        }
+      }
+
+      if (from === null || to === null) {
+        missingAnchors.push(anchorId);
         return;
       }
 
-      // Skip empty lines - mark decorations require non-zero ranges with content
-      if (!lineInfo || lineInfo.from >= lineInfo.to || lineInfo.text.trim().length === 0) {
-        this.logInfo(
-          `Skipping line ${lineNumber} - empty or no content to highlight`
-        );
-        return;
+      if (
+        Number.isFinite(resolvedLineNumber) &&
+        resolvedLineNumber > 0 &&
+        resolvedLineNumber !== edit.line
+      ) {
+        (edit as { line: number }).line = resolvedLineNumber;
       }
 
       const attributes: Record<string, string> = {
         "data-writersroom-anchor": anchorId,
         "data-wr-source": sourcePath,
         "data-wr-index": String(index),
-        "data-wr-line": String(edit.line),
+        "data-wr-line": String(resolvedLineNumber),
         "data-wr-type": edit.type,
         "data-wr-category": edit.category,
         "data-wr-anchor": anchorId,
@@ -1252,9 +1398,13 @@ export default class WritersRoomPlugin extends Plugin {
         attributes["data-wr-output"] = edit.output;
       }
 
+      if (typeof matchText === "string" && matchText.length > 0) {
+        attributes["data-wr-match"] = matchText;
+      }
+
       specs.push({
-        from: lineInfo.from,
-        to: lineInfo.to,
+        from,
+        to,
         className: classList.join(" "),
         attributes
       });
@@ -1275,18 +1425,13 @@ export default class WritersRoomPlugin extends Plugin {
         `Built ${specs.length}/${payload.edits.length} highlight specs for ${sourcePath}. Document appears to have changed significantly. Clearing stale edits.`,
         { totalLines, validSpecsRatio }
       );
-      
-      // Clear stale edits automatically
-      // This happens when the file has been modified significantly since edits were saved
-      if (this.activeSourcePath === sourcePath) {
-        this.activePayload = null;
-      }
-      this.persistedEdits.delete(sourcePath);
-      void this.saveData({
-        settings: this.settings,
-        edits: Object.fromEntries(this.persistedEdits)
-      });
-      void this.refreshSidebarForActiveFile();
+
+      this.markEditsAsStale(sourcePath);
+      return [];
+    }
+
+    if (missingAnchors.length > 0) {
+      this.resolveMissingAnchors(sourcePath, missingAnchors);
     }
 
     return specs;
@@ -1321,6 +1466,83 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     return Array.from(values).sort((a, b) => b.length - a.length);
+  }
+
+  private computeLineOffsets(text: string): number[] {
+    const offsets: number[] = [0];
+    for (let index = 0; index < text.length; index++) {
+      if (text.charCodeAt(index) === 10) {
+        offsets.push(index + 1);
+      }
+    }
+    return offsets;
+  }
+
+  private offsetToLineIndex(offset: number, lineOffsets: number[]): number {
+    if (lineOffsets.length === 0) {
+      return 0;
+    }
+
+    let low = 0;
+    let high = lineOffsets.length - 1;
+    let result = 0;
+
+    while (low <= high) {
+      const mid = Math.floor((low + high) / 2);
+      const midOffset = lineOffsets[mid];
+      if (midOffset <= offset) {
+        result = mid;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+
+    return result;
+  }
+
+  private findEditRangeInText(
+    text: string,
+    edit: EditEntry
+  ): { start: number; end: number } | null {
+    const variants = this.getEditorHighlightCandidates(edit);
+    if (!variants.length) {
+      return null;
+    }
+
+    const lineOffsets = this.computeLineOffsets(text);
+    const safeLineIndex = Math.min(
+      Math.max(edit.line - 1, 0),
+      Math.max(lineOffsets.length - 1, 0)
+    );
+    const searchStart = lineOffsets[safeLineIndex] ?? 0;
+
+    const isWithinLineRange = (offset: number): boolean => {
+      const lineIndex = this.offsetToLineIndex(offset, lineOffsets);
+      return Math.abs(lineIndex - safeLineIndex) <= 3;
+    };
+
+    for (const candidate of variants) {
+      if (!candidate) {
+        continue;
+      }
+      const localIndex = text.indexOf(candidate, searchStart);
+      if (localIndex !== -1 && isWithinLineRange(localIndex)) {
+        return { start: localIndex, end: localIndex + candidate.length };
+      }
+    }
+
+    for (const candidate of variants) {
+      if (!candidate) {
+        continue;
+      }
+      const globalIndex = text.indexOf(candidate);
+      if (globalIndex !== -1) {
+        return { start: globalIndex, end: globalIndex + candidate.length };
+      }
+    }
+
+    return null;
   }
 
   private resolveEditorHighlightRange(
@@ -1411,6 +1633,49 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     return null;
+  }
+
+  private resolveMissingAnchors(sourcePath: string, anchorIds: string[]): void {
+    const unique = Array.from(new Set(anchorIds)).filter((anchorId) => {
+      if (this.pendingAnchorResolutions.has(anchorId)) {
+        return false;
+      }
+      this.pendingAnchorResolutions.add(anchorId);
+      return true;
+    });
+
+    if (!unique.length) {
+      return;
+    }
+
+    const process = async (): Promise<void> => {
+      let removed = 0;
+      try {
+        for (const anchorId of unique) {
+          try {
+            await this.resolveSidebarEdit(sourcePath, anchorId);
+            removed += 1;
+          } catch (error) {
+            this.logError("Failed to auto-resolve missing Writers Room anchor.", error, {
+              sourcePath,
+              anchorId
+            });
+          }
+        }
+
+        if (removed > 0) {
+          const message =
+            removed === 1
+              ? "Removed an edit whose text no longer exists in the note."
+              : `Removed ${removed} edits whose text no longer exists in the note.`;
+          new Notice(message, 4000);
+        }
+      } finally {
+        unique.forEach((anchorId) => this.pendingAnchorResolutions.delete(anchorId));
+      }
+    };
+
+    void process();
   }
 
   private dispatchEditorHighlights(
@@ -1569,14 +1834,6 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
-    const anchorInfo = this.parseAnchorId(anchorId);
-    if (!anchorInfo) {
-      this.logWarn("Ignoring resolve request with invalid anchor identifier.", {
-        anchorId
-      });
-      return;
-    }
-
     const payload =
       this.activeSourcePath === sourcePath && this.activePayload
         ? this.activePayload
@@ -1589,16 +1846,17 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
-    if (anchorInfo.index < 0 || anchorInfo.index >= payload.edits.length) {
+    const match = this.findEditByAnchor(payload, anchorId);
+    if (!match) {
       this.logWarn("Resolve requested for edit outside payload bounds.", {
-        index: anchorInfo.index,
+        anchorId,
         total: payload.edits.length
       });
       return;
     }
 
     const updatedEdits = payload.edits.slice();
-    updatedEdits.splice(anchorInfo.index, 1);
+    updatedEdits.splice(match.index, 1);
 
     const updatedPayload: EditPayload = {
       ...payload,
@@ -1640,20 +1898,12 @@ export default class WritersRoomPlugin extends Plugin {
         this.activeAnchorId = null;
         this.activeEditIndex = null;
       } else if (this.activeAnchorId) {
-        const activeInfo = this.parseAnchorId(this.activeAnchorId);
-        if (activeInfo && activeInfo.index > anchorInfo.index) {
-          const adjustedIndex = activeInfo.index - 1;
-          const nextEdit = updatedPayload.edits[adjustedIndex];
-          if (nextEdit) {
-            this.activeAnchorId = this.buildAnchorId(
-              nextEdit.line,
-              adjustedIndex
-            );
-            this.activeEditIndex = adjustedIndex;
-          } else {
-            this.activeAnchorId = null;
-            this.activeEditIndex = null;
-          }
+        const activeMatch = this.findEditByAnchor(updatedPayload, this.activeAnchorId);
+        if (activeMatch) {
+          this.activeEditIndex = activeMatch.index;
+        } else {
+          this.activeAnchorId = null;
+          this.activeEditIndex = null;
         }
       }
 
@@ -1665,6 +1915,134 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     await this.refreshSidebarForActiveFile();
+  }
+
+  async applySidebarEdit(sourcePath: string, anchorId: string): Promise<void> {
+    if (!sourcePath) {
+      return;
+    }
+
+    let payload =
+      this.activeSourcePath === sourcePath && this.activePayload
+        ? this.activePayload
+        : await this.getEditPayloadForSource(sourcePath);
+
+    if (!payload) {
+      new Notice("No Writers Room edits available to apply for this note.");
+      return;
+    }
+
+    const match = this.findEditByAnchor(payload, anchorId);
+    if (!match) {
+      this.logWarn("Apply requested for edit outside payload bounds.", {
+        anchorId,
+        total: payload.edits.length
+      });
+      return;
+    }
+
+    const { edit } = match;
+
+    const supportedTypes: Array<EditEntry["type"]> = [
+      "addition",
+      "replacement",
+      "subtraction"
+    ];
+
+    if (!supportedTypes.includes(edit.type)) {
+      new Notice("Only additions, replacements, or subtractions can be applied automatically.");
+      return;
+    }
+
+    if ((edit.type === "addition" || edit.type === "replacement") && typeof edit.output !== "string") {
+      new Notice("This edit does not include replacement text and cannot be applied automatically.");
+      return;
+    }
+
+    const vault = this.getVault();
+    const abstractFile = vault.getAbstractFileByPath(sourcePath);
+    if (!this.isTFile(abstractFile)) {
+      new Notice("Unable to locate the target note for this edit.");
+      return;
+    }
+
+    const leaves = this.app.workspace.getLeavesOfType("markdown");
+    let targetView: MarkdownView | null = null;
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view instanceof MarkdownView && view.file?.path === sourcePath) {
+        targetView = view;
+        break;
+      }
+    }
+
+    let editor: Editor | null = null;
+    let docText: string;
+    if (targetView) {
+      editor = targetView.editor;
+      docText = editor.getValue();
+    } else {
+      docText = await vault.read(abstractFile);
+    }
+
+    const range = this.findEditRangeInText(docText, edit);
+    if (!range) {
+      this.logWarn("Failed to locate edit text within document during apply.", {
+        edit,
+        sourcePath
+      });
+      new Notice("Could not locate the original text for this edit. Please apply manually.");
+      return;
+    }
+
+    const newline = docText.includes("\r\n") ? "\r\n" : "\n";
+    let replacement = "";
+    let startOffset = range.start;
+    let endOffset = range.end;
+
+    if (edit.type === "replacement") {
+      replacement = edit.output as string;
+    } else if (edit.type === "subtraction") {
+      replacement = "";
+    } else {
+      const lineStart = docText.lastIndexOf("\n", range.end - 1);
+      const nextNewline = docText.indexOf("\n", range.end);
+      const lineText = docText.slice(
+        lineStart + 1,
+        nextNewline === -1 ? docText.length : nextNewline
+      );
+      const indentMatch = lineText.match(/^\s*/);
+      const indent = indentMatch?.[0] ?? "";
+      const insertion = `${newline}${indent}${edit.output as string}`;
+      startOffset = range.end;
+      endOffset = range.end;
+      replacement = insertion;
+    }
+
+    try {
+      if (editor) {
+        const startPos = editor.offsetToPos(startOffset);
+        const endPos = editor.offsetToPos(endOffset);
+        editor.replaceRange(replacement, startPos, endPos);
+      } else {
+        const before = docText.slice(0, startOffset);
+        const after = docText.slice(endOffset);
+        const updated = before + replacement + after;
+        await this.writeFile(sourcePath, updated);
+      }
+    } catch (error) {
+      this.logError("Failed to apply edit to document.", error);
+      new Notice("Failed to apply the edit. Check the console for details.");
+      return;
+    }
+
+    // Reload payload reference if we used cached value to avoid stale state.
+    if (this.activeSourcePath === sourcePath) {
+      payload = this.activePayload ?? payload;
+    }
+
+    await this.resolveSidebarEdit(sourcePath, anchorId);
+    new Notice(`Applied ${edit.type} on line ${edit.line}.`);
   }
 
   private async selectEdit(
@@ -1697,8 +2075,8 @@ export default class WritersRoomPlugin extends Plugin {
     this.activeAnchorId = anchorId;
     this.activePayload = payload;
 
-    const anchorInfo = this.parseAnchorId(anchorId);
-    const editIndex = anchorInfo?.index ?? null;
+    const match = this.findEditByAnchor(payload, anchorId);
+    const editIndex = match ? match.index : null;
     this.activeEditIndex = editIndex;
 
     const view = await this.ensureSidebar({
@@ -1721,7 +2099,11 @@ export default class WritersRoomPlugin extends Plugin {
     state: SidebarState
   ): Promise<WritersRoomSidebarView> {
     const view = await this.ensureSidebarView();
-    view.setState(state);
+    view.setState({
+      ...state,
+      progressLog:
+        state.progressLog ?? this.getProgressEntriesForSource(state.sourcePath ?? this.activeSourcePath)
+    });
     return view;
   }
 
@@ -1946,13 +2328,16 @@ export default class WritersRoomPlugin extends Plugin {
     shouldScroll: boolean
   ): void {
     const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    const anchorInfo = this.parseAnchorId(anchorId);
     let resolvedIndex = editIndex;
-    if (resolvedIndex === null && anchorInfo?.index != null) {
-      resolvedIndex = anchorInfo.index;
+    const payload = this.activePayload;
+
+    if (resolvedIndex === null && payload) {
+      const match = this.findEditByAnchor(payload, anchorId);
+      if (match) {
+        resolvedIndex = match.index;
+      }
     }
 
-    const payload = this.activePayload;
     const resolvedEdit =
       resolvedIndex !== null && payload
         ? payload.edits[resolvedIndex] ?? null
@@ -1962,8 +2347,15 @@ export default class WritersRoomPlugin extends Plugin {
     if (!Number.isFinite(lineNumber) && resolvedEdit) {
       lineNumber = resolvedEdit.line;
     }
-    if (!Number.isFinite(lineNumber) && anchorInfo?.line) {
-      lineNumber = anchorInfo.line;
+
+    if (!Number.isFinite(lineNumber)) {
+      const legacy = anchorId.match(/^writersroom-line-(\d+)-edit-(\d+)$/);
+      if (legacy) {
+        const parsed = Number(legacy[1]);
+        if (Number.isFinite(parsed)) {
+          lineNumber = parsed;
+        }
+      }
     }
 
     if (markdownView && Number.isFinite(lineNumber)) {
@@ -2225,7 +2617,194 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     this.requestInProgress = requesting;
+    if (!requesting) {
+      this.cancelRequestProgressTimer();
+    }
     this.sidebarView?.setRequestState(requesting);
+    if (requesting) {
+      this.emitProgressUpdate();
+    }
+  }
+
+  private startRequestProgress(sourcePath: string, initialMessage: string): void {
+    this.cancelRequestProgressTimer();
+    this.requestProgressSource = sourcePath;
+    this.requestProgressEntries = [{ message: initialMessage, tone: "active" }];
+    this.requestProgressActiveLabel = initialMessage;
+    this.requestProgressMessageIndex = -1;
+    this.emitProgressUpdate();
+  }
+
+  private advanceRequestProgress(message: string): void {
+    const previousLabel = this.requestProgressActiveLabel;
+    this.mutateActiveProgressEntry((entry) => {
+      if (previousLabel) {
+        entry.message = previousLabel;
+      }
+      entry.tone = "success";
+    });
+    this.requestProgressEntries.push({ message, tone: "active" });
+    if (this.requestProgressEntries.length > 8) {
+      this.requestProgressEntries = this.requestProgressEntries.slice(-8);
+    }
+    this.requestProgressActiveLabel = message;
+    this.requestProgressMessageIndex = -1;
+    this.emitProgressUpdate();
+  }
+
+  private updateActiveProgressMessage(message: string): void {
+    let updated = false;
+    const base = this.requestProgressActiveLabel;
+    const composite = base ? `${base} - ${message}` : message;
+    for (let index = this.requestProgressEntries.length - 1; index >= 0; index -= 1) {
+      const entry = this.requestProgressEntries[index];
+      if (entry.tone === "active") {
+        entry.message = composite;
+        updated = true;
+        break;
+      }
+    }
+
+    if (!updated) {
+      this.requestProgressEntries.push({ message: composite, tone: "active" });
+      this.requestProgressActiveLabel = base ?? message;
+    }
+
+    if (this.requestProgressEntries.length > 8) {
+      this.requestProgressEntries = this.requestProgressEntries.slice(-8);
+    }
+
+    this.emitProgressUpdate();
+  }
+
+  private mutateActiveProgressEntry(mutator: (entry: SidebarProgressEntry) => void): void {
+    for (let index = this.requestProgressEntries.length - 1; index >= 0; index -= 1) {
+      const entry = this.requestProgressEntries[index];
+      if (entry.tone === "active") {
+        mutator(entry);
+        return;
+      }
+    }
+  }
+
+  private completeRequestProgress(message?: string): void {
+    this.cancelRequestProgressTimer();
+    const base = this.requestProgressActiveLabel;
+    this.mutateActiveProgressEntry((entry) => {
+      if (base) {
+        entry.message = base;
+      }
+      entry.tone = "success";
+    });
+    this.requestProgressActiveLabel = null;
+    if (message) {
+      this.requestProgressEntries.push({ message, tone: "success" });
+      if (this.requestProgressEntries.length > 8) {
+        this.requestProgressEntries = this.requestProgressEntries.slice(-8);
+      }
+    }
+    this.emitProgressUpdate();
+  }
+
+  private failRequestProgress(message: string): void {
+    this.cancelRequestProgressTimer();
+    const base = this.requestProgressActiveLabel;
+    this.mutateActiveProgressEntry((entry) => {
+      entry.tone = "error";
+      if (base) {
+        entry.message = base;
+      }
+    });
+    this.requestProgressActiveLabel = null;
+    this.requestProgressEntries.push({ message, tone: "error" });
+    if (this.requestProgressEntries.length > 8) {
+      this.requestProgressEntries = this.requestProgressEntries.slice(-8);
+    }
+    this.emitProgressUpdate();
+  }
+
+  private resetRequestProgress(): void {
+    this.cancelRequestProgressTimer();
+    this.requestProgressEntries = [];
+    this.requestProgressSource = null;
+    this.requestProgressMessageIndex = -1;
+    this.requestProgressActiveLabel = null;
+    this.emitProgressUpdate();
+  }
+
+  private scheduleRequestProgressTicker(): void {
+    // No longer needed - progress comes from model's reasoning stream
+  }
+
+  private cancelRequestProgressTimer(): void {
+    if (this.requestProgressTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.requestProgressTimer);
+      this.requestProgressTimer = null;
+    }
+  }
+
+  private getProgressEntriesForSource(sourcePath: string | null): SidebarProgressEntry[] {
+    if (!sourcePath || this.requestProgressSource !== sourcePath) {
+      return [];
+    }
+
+    return this.requestProgressEntries.map((entry) => ({ ...entry }));
+  }
+
+  private emitProgressUpdate(): void {
+    if (!this.sidebarView) {
+      return;
+    }
+
+    const sourcePath = this.activeSourcePath ?? this.requestProgressSource;
+    const progressLog = this.getProgressEntriesForSource(sourcePath);
+
+    this.sidebarView.setState({
+      sourcePath: sourcePath ?? null,
+      payload: this.activePayload,
+      selectedAnchorId: this.activeAnchorId,
+      progressLog
+    });
+  }
+
+  private async clearOutstandingEditsBeforeRequest(
+    sourcePath: string
+  ): Promise<boolean> {
+    const payload = await this.getEditPayloadForSource(sourcePath);
+    if (!payload || payload.edits.length === 0) {
+      return true;
+    }
+
+    const warningMessage =
+      "Requesting new Writers Room edits will delete the existing suggestions for this note. Continue?";
+
+    let proceed = true;
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      proceed = window.confirm(warningMessage);
+    } else {
+      this.logWarn("Confirmation prompt unavailable; clearing outstanding edits automatically.", {
+        sourcePath,
+        existingEdits: payload.edits.length
+      });
+    }
+
+    if (!proceed) {
+      new Notice("Cancelled asking the Writers.");
+      return false;
+    }
+
+    const persisted = this.persistedEdits.get(sourcePath);
+    const editsPath = persisted?.editsPath ?? this.getEditsPathForSource(sourcePath);
+
+    this.removePersistedEdit(sourcePath, { cacheValue: null });
+
+    if (editsPath) {
+      await this.deleteFileIfExists(editsPath);
+    }
+
+    void this.refreshSidebarForActiveFile();
+    new Notice("Previous Writers Room edits deleted.");
+    return true;
   }
 
   private async requestAiEditsForFile(
@@ -2263,11 +2842,32 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
+    this.activeSourcePath = file.path;
+    this.activeAnchorId = null;
+    this.activeEditIndex = null;
+    this.activePayload = null;
+
+    const cleared = await this.clearOutstandingEditsBeforeRequest(file.path);
+    if (!cleared) {
+      return;
+    }
+
+    this.resetRequestProgress();
+
+    await this.ensureSidebar({
+      sourcePath: file.path,
+      payload: null,
+      selectedAnchorId: null
+    });
+
     this.setRequestState(true);
+    this.startRequestProgress(file.path, "Sending your note to the Writers…");
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
     try {
       const systemPrompt = `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
+
+IMPORTANT: Use your reasoning/thinking process to narrate your editorial thought process as you work. Share brief observations about what you notice (rhythm issues, sensory opportunities, pacing concerns) as you read through the text. This helps the writer understand your editorial perspective.
 
 Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will perform before editing. Keep checklist items conceptual, not implementation-level.
 
@@ -2337,6 +2937,7 @@ Malformed or blank input example:
         throw new Error("Fetch API is unavailable in this environment.");
       }
 
+      this.advanceRequestProgress("Writers are drafting their edits…");
       const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
@@ -2348,7 +2949,11 @@ Malformed or blank input example:
           messages: [
             { role: "system", content: systemPrompt },
             { role: "user", content: noteContents }
-          ]
+          ],
+          stream: true,
+          stream_options: {
+            include_usage: true
+          }
         })
       });
 
@@ -2357,13 +2962,82 @@ Malformed or blank input example:
         throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
       }
 
-      const parsed = await response.json() as {
-        choices?: Array<{
-          message?: { content?: string };
-        }>;
-      };
+      if (!response.body) {
+        throw new Error("OpenAI response did not include a readable stream.");
+      }
 
-      const completion = parsed.choices?.[0]?.message?.content ?? "";
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let completion = "";
+      let buffer = "";
+      let lastReasoningUpdate = Date.now();
+      const reasoningThrottleMs = 400;
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            break;
+          }
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed || trimmed === "data: [DONE]") {
+              continue;
+            }
+
+            if (!trimmed.startsWith("data: ")) {
+              continue;
+            }
+
+            const jsonStr = trimmed.slice(6);
+            try {
+              const chunk = JSON.parse(jsonStr) as {
+                choices?: Array<{
+                  delta?: {
+                    content?: string;
+                    reasoning_content?: string;
+                  };
+                  finish_reason?: string | null;
+                }>;
+              };
+
+              const delta = chunk.choices?.[0]?.delta;
+              if (!delta) {
+                continue;
+              }
+
+              if (delta.content) {
+                completion += delta.content;
+              }
+
+              if (delta.reasoning_content) {
+                const now = Date.now();
+                if (now - lastReasoningUpdate >= reasoningThrottleMs) {
+                  const reasoning = delta.reasoning_content.trim();
+                  if (reasoning.length > 0) {
+                    const display = reasoning.length > 120
+                      ? `${reasoning.slice(0, 117)}...`
+                      : reasoning;
+                    this.updateActiveProgressMessage(display);
+                    lastReasoningUpdate = now;
+                  }
+                }
+              }
+            } catch (parseError) {
+              this.logWarn("Failed to parse streaming chunk.", { line: trimmed, error: parseError });
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
+      }
+
+      this.advanceRequestProgress("Compiling the Writers response…");
 
       if (typeof completion !== "string" || completion.trim().length === 0) {
         throw new Error("OpenAI response did not include text content.");
@@ -2374,7 +3048,9 @@ Malformed or blank input example:
         throw new Error("OpenAI response did not include a JSON payload.");
       }
 
-  const payload = this.parseAiPayload(jsonText);
+    this.advanceRequestProgress("Validating and saving the edits…");
+
+    const payload = this.parseAiPayload(jsonText);
 
       await this.ensureFolder("edits");
       await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
@@ -2382,16 +3058,25 @@ Malformed or blank input example:
       await this.persistEditsForSource(file.path, payload, { editsPath });
       this.editCachePromises.delete(file.path);
       this.activeSourcePath = file.path;
+      this.activePayload = payload;
 
       this.logInfo("Writers Room edits generated.", {
         file: file.path,
         edits: payload.edits.length
       });
 
-      if (payload.edits.length > 0) {
-        const firstAnchor = this.buildAnchorId(payload.edits[0].line, 0);
+      const editsCount = payload.edits.length;
+      const progressCompletionMessage =
+        editsCount > 0
+          ? `Writers delivered ${editsCount} edit${editsCount === 1 ? "" : "s"}.`
+          : "Writers responded without new edits.";
+
+      this.completeRequestProgress(progressCompletionMessage);
+
+      if (editsCount > 0) {
+        const firstAnchor = this.getAnchorForEdit(payload.edits[0], 0);
         await this.selectEdit(file.path, firstAnchor, origin);
-        new Notice(`Writers provided ${payload.edits.length} edit${payload.edits.length === 1 ? "" : "s"}.`);
+        new Notice(`Writers provided ${editsCount} edit${editsCount === 1 ? "" : "s"}.`);
       } else {
         await this.refreshSidebarForActiveFile();
         new Notice("Writers responded without specific edits.");
@@ -2399,6 +3084,8 @@ Malformed or blank input example:
     } catch (error) {
       this.logError("AI edit request failed.", error);
       const message = error instanceof Error ? error.message : "Unknown error occurred.";
+      const progressMessage = message.length > 160 ? `${message.slice(0, 157)}...` : message;
+      this.failRequestProgress(`The Writers encountered an error: ${progressMessage}`);
       new Notice(`Failed to fetch Writers Room edits: ${message}`);
     } finally {
       loadingNotice.hide();
@@ -2623,7 +3310,8 @@ Malformed or blank input example:
       this.sidebarView.setState({
         sourcePath: this.activeSourcePath,
         payload,
-        selectedAnchorId: this.activeAnchorId
+        selectedAnchorId: this.activeAnchorId,
+        progressLog: this.getProgressEntriesForSource(this.activeSourcePath)
       });
 
       this.sidebarView.updateSelection(this.activeAnchorId);
@@ -2643,6 +3331,69 @@ Malformed or blank input example:
     if (this.sidebarView === view) {
       this.sidebarView = null;
     }
+  }
+
+  private ensureEditAnchor(edit: EditEntry, index: number): string {
+    const existing =
+      typeof edit.anchor === "string" && edit.anchor.trim().length > 0
+        ? edit.anchor.trim()
+        : "";
+
+    if (existing) {
+      return existing;
+    }
+
+    const generated = createEditAnchorId(
+      {
+        line: edit.line,
+        type: edit.type,
+        category: edit.category,
+        original_text: edit.original_text,
+        output: edit.output,
+        anchor: null
+      },
+      index
+    );
+
+    (edit as { anchor: string }).anchor = generated;
+    return generated;
+  }
+
+  getAnchorForEdit(edit: EditEntry, index: number): string {
+    return this.ensureEditAnchor(edit, index);
+  }
+
+  private findEditByAnchor(
+    payload: EditPayload | null,
+    anchorId: string
+  ): { edit: EditEntry; index: number } | null {
+    if (!payload || !anchorId) {
+      return null;
+    }
+
+    const trimmed = anchorId.trim();
+    for (let index = 0; index < payload.edits.length; index++) {
+      const edit = payload.edits[index];
+      const candidate = this.ensureEditAnchor(edit, index);
+      if (candidate === trimmed) {
+        return { edit, index };
+      }
+    }
+
+    const legacy = trimmed.match(/^writersroom-line-(\d+)-edit-(\d+)$/);
+    if (legacy) {
+      const legacyIndex = Number(legacy[2]);
+      if (
+        Number.isFinite(legacyIndex) &&
+        legacyIndex >= 0 &&
+        legacyIndex < payload.edits.length
+      ) {
+        const edit = payload.edits[legacyIndex];
+        return { edit, index: legacyIndex };
+      }
+    }
+
+    return null;
   }
 
   private getHighlightClasses(edit: EditEntry): string[] {
@@ -2689,6 +3440,10 @@ Malformed or blank input example:
 
       const contents = await adapter.read(editsPath);
       const payload = parseEditPayloadFromString(contents);
+      const normalized = JSON.stringify(payload, null, 2) + "\n";
+      if (normalized !== contents) {
+        await this.writeFile(editsPath, normalized);
+      }
       await this.persistEditsForSource(sourcePath, payload, { editsPath });
       return payload;
     } catch (error) {
@@ -2723,26 +3478,6 @@ Malformed or blank input example:
       .replace(/-{2,}/g, "-")
       .replace(/^-|-$/g, "")
       .toLowerCase();
-  }
-
-  buildAnchorId(line: number, index: number): string {
-    return `writersroom-line-${line}-edit-${index}`;
-  }
-
-  private parseAnchorId(anchorId: string): { line: number; index: number } | null {
-    const match = anchorId.match(/^writersroom-line-(\d+)-edit-(\d+)$/);
-    if (!match) {
-      return null;
-    }
-
-    const line = Number(match[1]);
-    const index = Number(match[2]);
-
-    if (!Number.isFinite(line) || !Number.isFinite(index)) {
-      return null;
-    }
-
-    return { line, index };
   }
 
   private injectStyles(): void {
@@ -3117,6 +3852,66 @@ export function buildWritersRoomCss(): string {
         white-space: pre-wrap;
       }
 
+      .writersroom-sidebar-progress {
+        margin: 0.65rem 0.9rem 0.2rem;
+        padding: 0.55rem 0.65rem;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        background: var(--background-secondary);
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+        font-size: 0.78em;
+      }
+
+      .writersroom-sidebar-progress-line {
+        display: flex;
+        align-items: center;
+        gap: 0.55rem;
+      }
+
+      .writersroom-sidebar-progress-dot {
+        width: 0.55rem;
+        height: 0.55rem;
+        border-radius: 50%;
+        background: var(--text-muted);
+        flex-shrink: 0;
+      }
+
+      .writersroom-sidebar-progress-line.is-active .writersroom-sidebar-progress-dot {
+        background: var(--interactive-accent);
+        animation: writersroom-progress-pulse 1.6s ease-in-out infinite;
+      }
+
+      .writersroom-sidebar-progress-line.is-success .writersroom-sidebar-progress-dot {
+        background: var(--interactive-success, #2ecc71);
+      }
+
+      .writersroom-sidebar-progress-line.is-error .writersroom-sidebar-progress-dot {
+        background: var(--color-red, #e74c3c);
+      }
+
+      .writersroom-sidebar-progress-text {
+        flex: 1;
+        color: var(--text-muted);
+        line-height: 1.4;
+      }
+
+      @keyframes writersroom-progress-pulse {
+        0% {
+          opacity: 0.55;
+          transform: scale(0.9);
+        }
+        50% {
+          opacity: 1;
+          transform: scale(1);
+        }
+        100% {
+          opacity: 0.55;
+          transform: scale(0.9);
+        }
+      }
+
       .writersroom-sidebar-list {
         flex: 1;
         overflow-y: auto;
@@ -3244,7 +4039,8 @@ class WritersRoomSidebarView extends ItemView {
   private state: SidebarState = {
     sourcePath: null,
     payload: null,
-    selectedAnchorId: null
+    selectedAnchorId: null,
+    progressLog: []
   };
   private requestButton: HTMLButtonElement | null = null;
   private isRequesting = false;
@@ -3277,7 +4073,8 @@ class WritersRoomSidebarView extends ItemView {
     this.state = {
       sourcePath: null,
       payload: null,
-      selectedAnchorId: null
+      selectedAnchorId: null,
+      progressLog: []
     };
     this.requestButton = null;
   }
@@ -3286,7 +4083,10 @@ class WritersRoomSidebarView extends ItemView {
     this.state = {
       sourcePath: state.sourcePath ?? null,
       payload: state.payload ?? null,
-      selectedAnchorId: state.selectedAnchorId ?? null
+      selectedAnchorId: state.selectedAnchorId ?? null,
+      progressLog: state.progressLog
+        ? state.progressLog.map((entry) => ({ ...entry }))
+        : []
     };
     this.render();
   }
@@ -3348,6 +4148,37 @@ class WritersRoomSidebarView extends ItemView {
       });
     }
 
+    const progressEntries = this.state.progressLog ?? [];
+    if (progressEntries.length > 0) {
+      const progressEl = containerEl.createDiv({
+        cls: "writersroom-sidebar-progress"
+      });
+      progressEl.setAttribute("role", "status");
+      progressEl.setAttribute("aria-live", "polite");
+      progressEl.setAttribute("aria-busy", this.isRequesting ? "true" : "false");
+
+      progressEntries.forEach((entry) => {
+        const lineEl = progressEl.createDiv({
+          cls: "writersroom-sidebar-progress-line"
+        });
+
+        if (entry.tone === "active") {
+          lineEl.addClass("is-active");
+        } else if (entry.tone === "success") {
+          lineEl.addClass("is-success");
+        } else if (entry.tone === "error") {
+          lineEl.addClass("is-error");
+        }
+
+        lineEl.createDiv({ cls: "writersroom-sidebar-progress-dot" });
+
+        lineEl.createDiv({
+          cls: "writersroom-sidebar-progress-text",
+          text: entry.message
+        });
+      });
+    }
+
     const listEl = containerEl.createDiv({
       cls: "writersroom-sidebar-list"
     });
@@ -3367,7 +4198,7 @@ class WritersRoomSidebarView extends ItemView {
       value.length > 160 ? `${value.slice(0, 157).trimEnd()}…` : value;
 
     edits.forEach((edit, index) => {
-      const anchorId = this.plugin.buildAnchorId(edit.line, index);
+      const anchorId = this.plugin.getAnchorForEdit(edit, index);
       const itemEl = listEl.createDiv({
         cls: "writersroom-sidebar-item",
         attr: { "data-anchor-id": anchorId }
@@ -3448,6 +4279,21 @@ class WritersRoomSidebarView extends ItemView {
       const sourcePath = this.state.sourcePath;
 
       if (sourcePath) {
+        const canApply =
+          edit.type === "subtraction" ||
+          ((edit.type === "addition" || edit.type === "replacement") &&
+            typeof edit.output === "string" &&
+            edit.output.length > 0);
+
+        if (canApply) {
+          actions.push({
+            label: "Apply",
+            title: "Apply this suggestion to the note",
+            onClick: () =>
+              this.plugin.applySidebarEdit(sourcePath, anchorId)
+          });
+        }
+
         actions.push({
           label: "Jump to",
           title: "Scroll note to this edit",
@@ -3593,6 +4439,11 @@ class WritersRoomSidebarView extends ItemView {
       "aria-busy",
       this.isRequesting ? "true" : "false"
     );
+
+    const progressEl = this.containerEl.querySelector<HTMLElement>(".writersroom-sidebar-progress");
+    if (progressEl) {
+      progressEl.setAttribute("aria-busy", this.isRequesting ? "true" : "false");
+    }
   }
 }
 

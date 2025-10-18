@@ -25,6 +25,7 @@ describe("parseEditPayload", () => {
       type: "addition",
       category: "flow"
     });
+    expect(result.edits[0].anchor).toMatch(/^writersroom-edit-/);
   });
 
   it("rejects payloads without required summary", () => {
@@ -125,6 +126,46 @@ describe("parseEditPayload", () => {
     };
 
     expect(() => parseEditPayload(payload)).toThrowError(/output must be a string or null/);
+  });
+
+  it("preserves anchors provided in the payload", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 4,
+          type: "addition",
+          category: "flow",
+          original_text: "Original text",
+          output: "Added text",
+          anchor: "writersroom-edit-custom-anchor"
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].anchor).toBe("writersroom-edit-custom-anchor");
+  });
+
+  it("generates deterministic anchors for identical edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 7,
+          type: "addition",
+          category: "flow",
+          original_text: "Original text",
+          output: "Added text"
+        }
+      ]
+    };
+
+    const firstParse = parseEditPayload(payload);
+    const secondParse = parseEditPayload(payload);
+    expect(firstParse.edits[0].anchor).toBe(secondParse.edits[0].anchor);
   });
 });
 

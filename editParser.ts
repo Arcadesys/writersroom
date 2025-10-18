@@ -3,6 +3,7 @@ export type EditCategory = "flow" | "rhythm" | "sensory" | "punch";
 
 export interface EditEntry {
   agent: "editor";
+  anchor: string;
   line: number;
   type: EditType;
   category: EditCategory;
@@ -51,6 +52,62 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+const WRITERSROOM_ANCHOR_PREFIX = "writersroom-edit-";
+
+function normalizeAnchorCandidate(value: unknown): string {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : "";
+}
+
+function hashAnchorSeed(seed: string): string {
+  let hash = 2166136261;
+
+  for (let index = 0; index < seed.length; index++) {
+    hash ^= seed.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return (hash >>> 0).toString(36);
+}
+
+export function createEditAnchorId(
+  entry: {
+    line: number;
+    type: EditType;
+    category: EditCategory;
+    original_text: string;
+    output: string | null;
+    anchor?: string | null;
+  },
+  index: number
+): string {
+  const existing =
+    normalizeAnchorCandidate(entry.anchor) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).anchorId) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).anchor_id) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).id);
+
+  if (existing) {
+    return existing;
+  }
+
+  const seed = [
+    entry.original_text ?? "",
+    entry.output ?? "",
+    entry.type ?? "",
+    entry.category ?? "",
+    Number.isFinite(entry.line) ? String(entry.line) : "",
+    Number.isFinite(index) ? String(index) : ""
+  ].join("|");
+
+  const hash = hashAnchorSeed(seed);
+  return `${WRITERSROOM_ANCHOR_PREFIX}${hash}`;
+}
+
 function parseEdit(entry: unknown, index: number): EditEntry {
   const path = `edits[${index}]`;
   assert(isRecord(entry), "Edit must be an object", path);
@@ -83,8 +140,25 @@ function parseEdit(entry: unknown, index: number): EditEntry {
     assert(output.length > 0, "output cannot be empty string", `${path}.output`);
   }
 
+  const anchorCandidate =
+    normalizeAnchorCandidate(entry.anchor) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).anchorId) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).anchor_id) ||
+    normalizeAnchorCandidate((entry as Record<string, unknown>).id);
+
   return {
     agent: "editor",
+    anchor: createEditAnchorId(
+      {
+        line,
+        type: type as EditType,
+        category: category as EditCategory,
+        original_text,
+        output: output === null ? null : (output as string),
+        anchor: anchorCandidate
+      },
+      index
+    ),
     line,
     type: type as EditType,
     category: category as EditCategory,
