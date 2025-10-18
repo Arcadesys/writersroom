@@ -21,12 +21,16 @@ FIELD GUIDELINES
 - `line`: Input line number corresponding to the edit.
 - `type`:
   - "addition": only provide newly inserted text
+  - "replacement": rewrite the existing snippet in full with the improved phrasing
+  - "star": highlight passages that already excel
   - "subtraction": output must be null (for removed text)
   - "annotation": no text is added or deleted; output is a brief bracketed comment or suggestion
 - `category`: one of "flow", "rhythm", "sensory", or "punch"
 - `original_text`: a snippet (phrase or sentence) of the affected text for context
 - `output`:
   - If type = "addition": only the text being inserted
+  - If type = "replacement": the revised text that should replace the original snippet
+  - If type = "star": an optional brief note celebrating why the passage works so well
   - If type = "subtraction": must be null
   - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
 
@@ -59,6 +63,14 @@ EXAMPLES
       "category": "punch",
       "original_text": "She didn’t like that idea.",
       "output": "[FLOW: consider a stronger verb to show her reaction.]"
+    },
+    {
+      "agent": "editor",
+      "line": 18,
+      "type": "star",
+      "category": "rhythm",
+      "original_text": "The night wrapped the porch in velvet silence.",
+      "output": "[STAR: musical cadence worth preserving as-is.]"
     }
   ],
   "summary": "Edits provide subtle improvements to rhythm and sensory detail; overall quality is enhanced without major changes."
@@ -74,7 +86,7 @@ OUTPUT: A valid JSON object with these fields:
 - `edits`: Array of edit objects, each containing:
   - `agent` (string, always "editor")
   - `line` (integer, starting at 1)
-  - `type` ("addition", "subtraction", or "annotation")
+  - `type` ("addition", "replacement", "subtraction", or "annotation")
   - `category` ("flow", "rhythm", "sensory", or "punch")
   - `original_text` (string, as found in input)
   - `output` (string or null, as appropriate)

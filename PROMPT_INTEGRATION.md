@@ -30,6 +30,8 @@ The prompt instructs the AI to act as a line-level prose editor specializing in:
 ## Edit Types
 
 - **addition** - Suggests adding or expanding text
+- **replacement** - Rewrites the existing snippet without changing its scope
+- **star** - Calls out exemplary text worth keeping
 - **subtraction** - Suggests removing or condensing text (output is null)
 - **annotation** - Editorial comment or suggestion (output contains the comment)
 
@@ -42,7 +44,7 @@ The prompt instructs the AI to act as a line-level prose editor specializing in:
     {
       "agent": "editor",
       "line": 1,
-      "type": "addition" | "subtraction" | "annotation",
+  "type": "addition" | "replacement" | "star" | "subtraction" | "annotation",
       "category": "flow" | "rhythm" | "sensory" | "punch",
       "original_text": "Text from the source document",
       "output": "Revised text or annotation comment (null for subtractions)"

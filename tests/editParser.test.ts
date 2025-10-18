@@ -66,7 +66,47 @@ describe("parseEditPayload", () => {
       ]
     };
 
-    expect(() => parseEditPayload(payload)).toThrowError(/type must be addition/);
+    expect(() => parseEditPayload(payload)).toThrowError(/type must be one of/);
+  });
+
+  it("accepts replacement edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 3,
+          type: "replacement",
+          category: "flow",
+          original_text: "A dull sentence.",
+          output: "A sharper, livelier sentence."
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].type).toBe("replacement");
+    expect(result.edits[0].output).toBe("A sharper, livelier sentence.");
+  });
+
+  it("accepts star edits", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 5,
+          type: "star",
+          category: "punch",
+          original_text: "The final line hit like a bell.",
+          output: "[STAR: resonant closing image worth preserving.]"
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].type).toBe("star");
+    expect(result.edits[0].output).toContain("STAR");
   });
 
   it("rejects payloads with invalid output value", () => {

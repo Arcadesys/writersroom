@@ -1,4 +1,4 @@
-export type EditType = "addition" | "subtraction" | "annotation";
+export type EditType = "addition" | "subtraction" | "annotation" | "replacement" | "star";
 export type EditCategory = "flow" | "rhythm" | "sensory" | "punch";
 
 export interface EditEntry {
@@ -29,7 +29,9 @@ export class ValidationError extends Error {
 const EDIT_TYPES: ReadonlySet<EditType> = new Set([
   "addition",
   "subtraction",
-  "annotation"
+  "annotation",
+  "replacement",
+  "star"
 ]);
 
 const EDIT_CATEGORIES: ReadonlySet<EditCategory> = new Set([
@@ -62,7 +64,8 @@ function parseEdit(entry: unknown, index: number): EditEntry {
   assert(line >= 1, "line must be at least 1", `${path}.line`);
 
   assert(typeof type === "string", "type must be a string", `${path}.type`);
-  assert(EDIT_TYPES.has(type as EditType), "type must be addition, subtraction, or annotation", `${path}.type`);
+  const allowedTypes = Array.from(EDIT_TYPES).join(", ");
+  assert(EDIT_TYPES.has(type as EditType), `type must be one of: ${allowedTypes}`, `${path}.type`);
 
   assert(typeof category === "string", "category must be a string", `${path}.category`);
   assert(EDIT_CATEGORIES.has(category as EditCategory), "category must be flow, rhythm, sensory, or punch", `${path}.category`);

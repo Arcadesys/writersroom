@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { EditorState } from "@codemirror/state";
-import { Decoration } from "@codemirror/view";
-
+// @ts-ignore Vitest processes TypeScript modules directly in test builds
 import {
   buildWritersRoomCss,
   setEditorHighlightsEffect,
-  writersRoomEditorHighlightsField
+  writersRoomEditorHighlightsField,
+  getCodeMirrorModules
 } from "../main.ts";
+
+const { state: cmState, view: cmView } = getCodeMirrorModules();
+const { EditorState } = cmState;
+const { Decoration } = cmView;
+type CMDecorationInstance = ReturnType<typeof Decoration.mark>;
 
 describe("Writers Room editor highlights", () => {
   it("exposes CSS that targets CodeMirror editor highlights", () => {
@@ -16,6 +20,8 @@ describe("Writers Room editor highlights", () => {
     expect(css).toMatch(/\.writersroom-highlight-active/);
     // Check for type-specific styles
     expect(css).toMatch(/\[data-wr-type="addition"\]/);
+  expect(css).toMatch(/\[data-wr-type="replacement"\]/);
+  expect(css).toMatch(/\[data-wr-type="star"\]/);
     expect(css).toMatch(/\[data-wr-type="subtraction"\]/);
     expect(css).toMatch(/\[data-wr-type="annotation"\]/);
   });
@@ -53,7 +59,7 @@ describe("Writers Room editor highlights", () => {
     decorations.between(0, state.doc.length, (from, to, value) => {
       if (from === 0 && to === 7) {
         found = true;
-        const decoration = value as Decoration;
+  const decoration = value as CMDecorationInstance;
         expect(decoration.spec.class).toContain("writersroom-highlight");
         expect(decoration.spec.attributes?.["data-wr-match"]).toBe("Example");
         expect(decoration.spec.attributes?.["data-writersroom-anchor"]).toBe(
