@@ -14,7 +14,7 @@ import {
   WorkspaceLeaf
 } from "obsidian";
 
-import { RangeSetBuilder, StateEffect, StateField, EditorState, Facet, Compartment } from "@codemirror/state";
+import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
 import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, PluginValue } from "@codemirror/view";
 
 import {
@@ -35,11 +35,6 @@ interface WritersRoomSettings {
 const DEFAULT_SETTINGS: WritersRoomSettings = {
   apiKey: ""
 };
-
-// Settings facet for reactive updates across editor extensions
-export const writersRoomSettingsFacet = Facet.define<WritersRoomSettings, WritersRoomSettings>({
-  combine: (values) => values[0] || DEFAULT_SETTINGS
-});
 
 interface EditorHighlightSpec {
   from: number;
@@ -216,7 +211,6 @@ interface HighlightActivationOptions {
 
 export default class WritersRoomPlugin extends Plugin {
   settings: WritersRoomSettings = DEFAULT_SETTINGS;
-  private settingsCompartment = new Compartment();
   private persistedEdits = new Map<string, PersistedEditEntry>();
   private editCache = new Map<string, EditPayload | null>();
   private editCachePromises = new Map<string, Promise<EditPayload | null>>();
@@ -509,10 +503,7 @@ export default class WritersRoomPlugin extends Plugin {
     
     // Register editor extensions for CodeMirror
     // Include settings facet for reactive updates
-    const editorExtensions = [
-      ...writersRoomEditorExtension,
-      this.settingsCompartment.of(writersRoomSettingsFacet.of(this.settings))
-    ];
+    const editorExtensions = [...writersRoomEditorExtension];
     
     (this as unknown as { registerEditorExtension: (extension: unknown) => void })
       .registerEditorExtension(editorExtensions);
@@ -2540,24 +2531,6 @@ Malformed or blank input example:
   async saveSettings() {
     await this.persistState();
     this.sidebarView?.setRequestState(this.requestInProgress);
-    
-    // Update settings facet in all editor views for reactive updates
-    const leaves = this.app.workspace.getLeavesOfType("markdown");
-    for (const leaf of leaves) {
-      const view = leaf.view;
-      if (!(view instanceof MarkdownView)) continue;
-      
-      const editorView = this.getEditorViewFromMarkdownView(view);
-      if (!editorView) continue;
-      
-      editorView.dispatch({
-        effects: this.settingsCompartment.reconfigure(
-          writersRoomSettingsFacet.of(this.settings)
-        )
-      });
-    }
-    
-    this.logInfo("Updated settings in all editor views");
   }
 }
 
