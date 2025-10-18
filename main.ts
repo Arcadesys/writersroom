@@ -144,6 +144,51 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
+  private readEnvVar(name: string): string {
+    const candidates: Array<string | undefined> = [];
+
+    if (typeof process !== "undefined" && process?.env) {
+      candidates.push(process.env[name]);
+    }
+
+    if (typeof window !== "undefined") {
+      const windowProcess = (window as unknown as {
+        process?: { env?: Record<string, string | undefined> };
+      }).process;
+      if (windowProcess?.env) {
+        candidates.push(windowProcess.env[name]);
+      }
+    }
+
+    for (const value of candidates) {
+      if (typeof value === "string") {
+        const trimmed = value.trim();
+        if (trimmed) {
+          return trimmed;
+        }
+      }
+    }
+
+    return "";
+  }
+
+  getResolvedApiKey(): string {
+    const fromEnv = this.readEnvVar("WRITERSROOM_API_KEY");
+    if (fromEnv) {
+      return fromEnv;
+    }
+
+    return this.settings.apiKey.trim();
+  }
+
+  hasResolvedApiKey(): boolean {
+    return this.getResolvedApiKey().length > 0;
+  }
+
+  isUsingEnvironmentApiKey(): boolean {
+    return this.readEnvVar("WRITERSROOM_API_KEY").length > 0;
+  }
+
   private resolveStoredData(raw: unknown): {
     settings: WritersRoomSettings;
     edits: Record<string, StoredEditRecord>;
@@ -1072,7 +1117,7 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
-    const apiKey = this.settings.apiKey.trim();
+    const apiKey = this.getResolvedApiKey();
     if (!apiKey) {
       new Notice("Add your OpenAI API key in Writers Room settings first.");
       return;
@@ -2170,7 +2215,7 @@ class WritersRoomSidebarView extends ItemView {
       return;
     }
 
-    const apiKeyMissing = this.plugin.settings.apiKey.trim().length === 0;
+    const apiKeyMissing = !this.plugin.hasResolvedApiKey();
     const disabled = this.isRequesting || !this.state.sourcePath || apiKeyMissing;
     if (disabled) {
       this.requestButton.setAttribute("disabled", "true");
@@ -2178,10 +2223,17 @@ class WritersRoomSidebarView extends ItemView {
       this.requestButton.removeAttribute("disabled");
     }
 
+    this.requestButton.removeAttribute("title");
     if (apiKeyMissing) {
-      this.requestButton.setAttribute("title", "Add your OpenAI API key in Writers Room settings to enable this action.");
-    } else {
-      this.requestButton.removeAttribute("title");
+      this.requestButton.setAttribute(
+        "title",
+        "Add your OpenAI API key in settings or set the WRITERSROOM_API_KEY environment variable to enable this action."
+      );
+    } else if (this.plugin.isUsingEnvironmentApiKey()) {
+      this.requestButton.setAttribute(
+        "title",
+        "Using key from WRITERSROOM_API_KEY environment variable."
+      );
     }
 
     this.requestButton.textContent = this.isRequesting
@@ -2209,9 +2261,14 @@ class WritersRoomSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Writers Room Settings" });
 
+    const envOverrideActive = this.plugin.isUsingEnvironmentApiKey();
+    const apiKeyDescription =
+      "Store the secret key used when calling the OpenAI API. Set the WRITERSROOM_API_KEY environment variable to override this value." +
+      (envOverrideActive ? " (Environment override detected.)" : "");
+
     new Setting(containerEl)
       .setName("OpenAI API Key")
-      .setDesc("Store the secret key used when calling the OpenAI API.")
+      .setDesc(apiKeyDescription)
       .addText((text: TextComponent) => {
         text
           .setPlaceholder("sk-...")
