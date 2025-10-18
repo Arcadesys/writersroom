@@ -3,6 +3,18 @@ declare module "obsidian" {
     vault: Vault;
   }
 
+  export interface MarkdownSectionInformation {
+    lineStart: number;
+    lineEnd: number;
+  }
+
+  export interface MarkdownPostProcessorContext {
+    sourcePath: string;
+    getSectionInfo(element: HTMLElement): MarkdownSectionInformation | null;
+  }
+
+  export interface EventRef {}
+
   interface SettingContainerEl extends HTMLElement {
     empty(): void;
     createEl<K extends keyof HTMLElementTagNameMap>(
@@ -16,6 +28,7 @@ declare module "obsidian" {
   export class TFile extends TAbstractFile {
     path: string;
     basename: string;
+    extension: string;
   }
 
   export class TFolder extends TAbstractFile {
@@ -37,6 +50,7 @@ declare module "obsidian" {
     create(path: string, data: string): Promise<TFile>;
     createFolder(path: string): Promise<TFolder>;
     modify(file: TFile, data: string): Promise<void>;
+    on(event: string, callback: (file: TAbstractFile) => void): EventRef;
   }
 
   export interface Command {
@@ -45,14 +59,26 @@ declare module "obsidian" {
     callback: () => void;
   }
 
+  export interface PluginManifest {
+    dir?: string;
+    id: string;
+    name: string;
+    version: string;
+  }
+
   export class Notice {
     constructor(message: string, timeout?: number);
   }
 
   export class Plugin {
     app: App;
+    manifest: PluginManifest;
     addCommand(command: Command): void;
     addSettingTab(tab: PluginSettingTab): void;
+    registerEvent(eventRef: EventRef): void;
+    registerMarkdownPostProcessor(
+      processor: (element: HTMLElement, context: MarkdownPostProcessorContext) => void | Promise<void>
+    ): void;
     loadData<T>(): Promise<T | undefined>;
     saveData(data: unknown): Promise<void>;
   }
