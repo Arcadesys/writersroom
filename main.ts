@@ -1517,20 +1517,34 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
-    const indexFromDataset = Number(target.dataset.wrIndex);
+    const indexFromDataset = Number(target?.dataset?.wrIndex);
     const resolvedIndex = Number.isFinite(indexFromDataset)
       ? indexFromDataset
       : effectiveIndex;
 
-    target.classList.add("writersroom-highlight-active");
-
     const smoothScroll = options?.scroll ?? false;
     this.scrollEditorsToAnchor(
-      target,
+      target ?? null,
       anchorId,
       resolvedIndex ?? null,
       smoothScroll
     );
+
+    if (!target) {
+      const attempts = options?.attempts ?? 0;
+      if (attempts < 5 && typeof window !== "undefined") {
+        this.highlightRetryHandle = window.setTimeout(() => {
+          this.setActiveHighlight(anchorId, {
+            scroll: options?.scroll,
+            attempts: attempts + 1,
+            editIndex: effectiveIndex
+          });
+        }, 180);
+      }
+      return;
+    }
+
+    target.classList.add("writersroom-highlight-active");
 
     if (options?.scroll) {
       target.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -1544,19 +1558,30 @@ export default class WritersRoomPlugin extends Plugin {
   }
 
   private scrollEditorsToAnchor(
-    target: HTMLElement,
+    target: HTMLElement | null,
     anchorId: string,
     editIndex: number | null,
     smooth: boolean
   ): void {
     const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-    let lineNumber = Number(target.dataset.wrLine);
+    const anchorInfo = this.parseAnchorId(anchorId);
+    let resolvedIndex = editIndex;
+    if (resolvedIndex === null && anchorInfo?.index != null) {
+      resolvedIndex = anchorInfo.index;
+    }
 
-    if (!Number.isFinite(lineNumber) && editIndex !== null && this.activePayload) {
-      const edit = this.activePayload.edits[editIndex];
-      if (edit) {
-        lineNumber = edit.line;
-      }
+    const payload = this.activePayload;
+    const edit =
+      resolvedIndex !== null && payload
+        ? payload.edits[resolvedIndex] ?? null
+        : null;
+
+    let lineNumber = Number(target?.dataset?.wrLine);
+    if (!Number.isFinite(lineNumber) && edit) {
+      lineNumber = edit.line;
+    }
+    if (!Number.isFinite(lineNumber) && anchorInfo?.line) {
+      lineNumber = anchorInfo.line;
     }
 
     if (markdownView && Number.isFinite(lineNumber)) {
@@ -1613,10 +1638,10 @@ export default class WritersRoomPlugin extends Plugin {
         }
       };
 
-      addCandidate(target.dataset.wrMatch);
-      addCandidate(target.textContent ?? "");
-      addCandidate(target.dataset.wrOriginal);
-      addCandidate(target.dataset.wrOutput);
+      addCandidate(target?.dataset?.wrMatch);
+      addCandidate(target?.textContent ?? "");
+      addCandidate(target?.dataset?.wrOriginal);
+      addCandidate(target?.dataset?.wrOutput);
       if (edit) {
         addCandidate(edit.original_text);
         if (typeof edit.output === "string") {
