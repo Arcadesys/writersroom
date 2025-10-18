@@ -4704,6 +4704,34 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         line-height: 1.5;
         font-style: italic;
       }
+      
+      .writersroom-annotation-formatted {
+        display: block;
+      }
+      
+      .writersroom-annotation-list-item {
+        display: flex;
+        align-items: flex-start;
+        margin: 0.4rem 0;
+        gap: 0.5rem;
+      }
+      
+      .writersroom-annotation-number {
+        color: var(--text-accent);
+        font-weight: 600;
+        flex-shrink: 0;
+        min-width: 1.5rem;
+      }
+      
+      .writersroom-annotation-content {
+        flex: 1;
+        line-height: 1.4;
+      }
+      
+      .writersroom-annotation-text-block {
+        margin: 0.4rem 0;
+        line-height: 1.4;
+      }
 
       .writersroom-sidebar-item-actions {
         display: flex;
@@ -4915,6 +4943,39 @@ class WritersRoomSidebarView extends ItemView {
     this.tokenAnimationFrame = window.requestAnimationFrame(step);
   }
 
+  private formatAnnotationText(text: string): HTMLElement {
+    const container = createDiv({ cls: "writersroom-annotation-formatted" });
+    
+    // Check if text contains numbered list patterns like "1)", "2)", etc.
+    const hasNumberedList = /\d+\)\s/.test(text);
+    
+    if (hasNumberedList) {
+      // Split on numbered items while preserving the numbers
+      const items = text.split(/(?=\d+\)\s)/);
+      
+      items.forEach((item, index) => {
+        const trimmed = item.trim();
+        if (!trimmed) return;
+        
+        // Check if this starts with a number
+        const match = trimmed.match(/^(\d+)\)\s+(.+)/s);
+        if (match) {
+          const itemEl = container.createDiv({ cls: "writersroom-annotation-list-item" });
+          itemEl.createEl("span", { cls: "writersroom-annotation-number", text: `${match[1]})` });
+          itemEl.createEl("span", { cls: "writersroom-annotation-content", text: match[2].trim() });
+        } else {
+          // Text before the list or between items
+          container.createDiv({ cls: "writersroom-annotation-text-block", text: trimmed });
+        }
+      });
+    } else {
+      // No list formatting needed, just render as text
+      container.textContent = text;
+    }
+    
+    return container;
+  }
+
   private renderTokenTicker(parent: HTMLElement): void {
     const tickerState = this.state.tokenTicker;
     if (!tickerState) {
@@ -5121,10 +5182,10 @@ class WritersRoomSidebarView extends ItemView {
           });
           // Show the annotation comment in full (never truncate editorial comments)
           if (outputText) {
-            contentEl.createEl("div", {
-              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
-              text: outputText
-            });
+            const formattedAnnotation = this.formatAnnotationText(outputText);
+            formattedAnnotation.addClass("writersroom-sidebar-item-snippet");
+            formattedAnnotation.addClass("writersroom-sidebar-annotation-text");
+            contentEl.appendChild(formattedAnnotation);
           } else {
             // Show placeholder for legacy annotations without output text
             contentEl.createEl("div", {
@@ -5140,10 +5201,10 @@ class WritersRoomSidebarView extends ItemView {
 
           // Show star comments in full (never truncate editorial praise)
           if (outputText) {
-            contentEl.createEl("div", {
-              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
-              text: outputText
-            });
+            const formattedStar = this.formatAnnotationText(outputText);
+            formattedStar.addClass("writersroom-sidebar-item-snippet");
+            formattedStar.addClass("writersroom-sidebar-star-text");
+            contentEl.appendChild(formattedStar);
           }
         } else {
           // For additions, replacements, and subtractions, show original snippet
@@ -5161,10 +5222,9 @@ class WritersRoomSidebarView extends ItemView {
               cls: "writersroom-sidebar-item-annotation-label",
               text: "💭 Writer's note:"
             });
-            annotationBox.createEl("div", {
-              cls: "writersroom-sidebar-item-annotation-text",
-              text: edit.annotation
-            });
+            const formattedAnnotation = this.formatAnnotationText(edit.annotation);
+            formattedAnnotation.addClass("writersroom-sidebar-item-annotation-text");
+            annotationBox.appendChild(formattedAnnotation);
           }
           
           // Show the suggested revision if available
