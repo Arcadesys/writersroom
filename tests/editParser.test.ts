@@ -261,6 +261,128 @@ describe("parseEditPayload", () => {
 
     expect(() => parseEditPayload(payload)).toThrowError(/output cannot be empty string for star edits/);
   });
+
+  it("groups annotations with replacements on the same line", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 5,
+          type: "replacement",
+          category: "flow",
+          original_text: "The old text.",
+          output: "The new text."
+        },
+        {
+          agent: "editor",
+          line: 5,
+          type: "annotation",
+          category: "rhythm",
+          original_text: "The old text.",
+          output: "This improves the pacing."
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    
+    // Should have only 1 edit after grouping
+    expect(result.edits).toHaveLength(1);
+    expect(result.edits[0].type).toBe("replacement");
+    expect(result.edits[0].output).toBe("The new text.");
+    expect(result.edits[0].annotation).toBe("This improves the pacing.");
+  });
+
+  it("groups multiple annotations into one replacement", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 3,
+          type: "replacement",
+          category: "flow",
+          original_text: "Text.",
+          output: "Better text."
+        },
+        {
+          agent: "editor",
+          line: 3,
+          type: "annotation",
+          category: "rhythm",
+          original_text: "Text.",
+          output: "First note."
+        },
+        {
+          agent: "editor",
+          line: 3,
+          type: "annotation",
+          category: "sensory",
+          original_text: "Text.",
+          output: "Second note."
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    
+    expect(result.edits).toHaveLength(1);
+    expect(result.edits[0].annotation).toBe("First note. Second note.");
+  });
+
+  it("keeps only annotation if no substantive edit on line", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 2,
+          type: "annotation",
+          category: "punch",
+          original_text: "Text.",
+          output: "Just a comment."
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    
+    expect(result.edits).toHaveLength(1);
+    expect(result.edits[0].type).toBe("annotation");
+    expect(result.edits[0].annotation).toBeUndefined();
+  });
+
+  it("discards duplicate substantive edits on same line", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "editor",
+          line: 4,
+          type: "replacement",
+          category: "flow",
+          original_text: "Text.",
+          output: "First replacement."
+        },
+        {
+          agent: "editor",
+          line: 4,
+          type: "addition",
+          category: "sensory",
+          original_text: "Text.",
+          output: "Second addition."
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    
+    // Should only keep the first substantive edit
+    expect(result.edits).toHaveLength(1);
+    expect(result.edits[0].type).toBe("replacement");
+    expect(result.edits[0].output).toBe("First replacement.");
+  });
 });
 
 describe("parseEditPayloadFromString", () => {

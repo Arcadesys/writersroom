@@ -178,6 +178,8 @@ function parseEdit(entry: unknown, index: number): EditEntry {
  * Combines annotations with other edits on the same line to reduce visual noise.
  * If an annotation and a replacement (or other substantive edit) target the same line,
  * merge the annotation text into the substantive edit.
+ * If multiple substantive edits exist on the same line, prefer the first one and merge
+ * the annotation into it, discarding the others (this shouldn't happen with proper prompts).
  */
 function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
   // Group edits by line number
@@ -202,9 +204,10 @@ function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
     const annotations = lineEdits.filter(e => e.type === "annotation");
     const substantiveEdits = lineEdits.filter(e => e.type !== "annotation");
 
-    // If no annotations, keep all edits
+    // If no annotations, keep all edits (though ideally there should be only one substantive edit per line)
     if (annotations.length === 0) {
-      combined.push(...lineEdits);
+      // If multiple substantive edits on same line, only keep the first one (model error)
+      combined.push(substantiveEdits[0]);
       continue;
     }
 
@@ -216,16 +219,15 @@ function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
         .filter(text => text.length > 0)
         .join(" ");
 
-      // Merge annotations into substantive edits
-      for (const edit of substantiveEdits) {
-        combined.push({
-          ...edit,
-          annotation: annotationText || null
-        });
-      }
+      // Merge annotations into the first substantive edit
+      // (If there are multiple substantive edits, only keep the first - this is a model error)
+      combined.push({
+        ...substantiveEdits[0],
+        annotation: annotationText || null
+      });
     } else {
-      // Only annotations on this line, keep them
-      combined.push(...annotations);
+      // Only annotations on this line, keep them (or just the first if multiple)
+      combined.push(annotations[0]);
     }
   }
 

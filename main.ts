@@ -3496,7 +3496,18 @@ Malformed or blank input example:
                   };
                   finish_reason?: string | null;
                 }>;
+                usage?: {
+                  prompt_tokens?: number;
+                  completion_tokens?: number;
+                  total_tokens?: number;
+                };
               };
+
+              // Check for usage information (sent in final chunk when include_usage is true)
+              if (chunk.usage?.completion_tokens) {
+                tokensReceived = chunk.usage.completion_tokens;
+                this.updateTokenTicker(tokensReceived);
+              }
 
               const delta = chunk.choices?.[0]?.delta;
               if (!delta) {
@@ -3505,7 +3516,8 @@ Malformed or blank input example:
 
               if (delta.content) {
                 completion += delta.content;
-                tokensReceived++;
+                // Estimate tokens as we go (roughly 4 characters per token)
+                tokensReceived = Math.floor(completion.length / 4);
                 this.updateTokenTicker(tokensReceived);
               }
 
@@ -4663,6 +4675,35 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         border-left: 3px solid var(--text-accent);
         font-style: italic;
       }
+      
+      .writersroom-sidebar-item-annotation-box {
+        background: linear-gradient(135deg, 
+          rgba(100, 150, 255, 0.08) 0%, 
+          rgba(80, 120, 255, 0.06) 100%);
+        border: 1px solid rgba(100, 150, 255, 0.25);
+        border-left: 3px solid rgba(100, 150, 255, 0.6);
+        border-radius: 6px;
+        padding: 0.6rem 0.7rem;
+        margin: 0.5rem 0;
+        position: relative;
+      }
+      
+      .writersroom-sidebar-item-annotation-label {
+        font-size: 0.75em;
+        font-weight: 600;
+        color: var(--text-accent);
+        margin-bottom: 0.3rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        opacity: 0.9;
+      }
+      
+      .writersroom-sidebar-item-annotation-text {
+        font-size: 0.85em;
+        color: var(--text-normal);
+        line-height: 1.5;
+        font-style: italic;
+      }
 
       .writersroom-sidebar-item-actions {
         display: flex;
@@ -5110,19 +5151,27 @@ class WritersRoomSidebarView extends ItemView {
             cls: "writersroom-sidebar-item-original",
             text: previewText(edit.original_text)
           });
+          
+          // If this edit has a merged annotation, show it prominently BEFORE the output
+          if (edit.annotation) {
+            const annotationBox = contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-annotation-box"
+            });
+            annotationBox.createEl("div", {
+              cls: "writersroom-sidebar-item-annotation-label",
+              text: "💭 Writer's note:"
+            });
+            annotationBox.createEl("div", {
+              cls: "writersroom-sidebar-item-annotation-text",
+              text: edit.annotation
+            });
+          }
+          
           // Show the suggested revision if available
           if (outputText) {
             contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
               text: previewText(outputText)
-            });
-          }
-          
-          // If this edit has a merged annotation, show it
-          if (edit.annotation) {
-            contentEl.createEl("div", {
-              cls: "writersroom-sidebar-item-annotation",
-              text: `💭 ${edit.annotation}`
             });
           }
         }
