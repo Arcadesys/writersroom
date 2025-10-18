@@ -1,6 +1,28 @@
 declare module "obsidian" {
   export interface App {
     vault: Vault;
+    workspace: Workspace;
+  }
+
+  export interface Workspace {
+    on(event: string, callback: (file: TFile | null) => void): EventRef;
+    getActiveFile(): TFile | null;
+    openLinkText?(path: string, sourcePath: string, newLeaf?: boolean): Promise<void>;
+    getLeavesOfType(viewType: string): WorkspaceLeaf[];
+    getRightLeaf(replace?: boolean): WorkspaceLeaf | null;
+    revealLeaf(leaf: WorkspaceLeaf): Promise<void>;
+  }
+
+  export class WorkspaceLeaf {
+    view: ItemView;
+    setViewState(state: { type: string; active?: boolean }): Promise<void>;
+  }
+
+  export class ItemView {
+    containerEl: HTMLElement;
+    constructor(leaf: WorkspaceLeaf);
+    getViewType(): string;
+    getDisplayText(): string;
   }
 
   export interface MarkdownSectionInformation {
@@ -50,6 +72,7 @@ declare module "obsidian" {
     create(path: string, data: string): Promise<TFile>;
     createFolder(path: string): Promise<TFolder>;
     modify(file: TFile, data: string): Promise<void>;
+    read(file: TFile): Promise<string>;
     on(event: string, callback: (file: TAbstractFile) => void): EventRef;
   }
 
@@ -68,6 +91,7 @@ declare module "obsidian" {
 
   export class Notice {
     constructor(message: string, timeout?: number);
+    hide(): void;
   }
 
   export class Plugin {
@@ -75,6 +99,7 @@ declare module "obsidian" {
     manifest: PluginManifest;
     addCommand(command: Command): void;
     addSettingTab(tab: PluginSettingTab): void;
+    registerView(type: string, callback: (leaf: WorkspaceLeaf) => ItemView): void;
     registerEvent(eventRef: EventRef): void;
     registerMarkdownPostProcessor(
       processor: (element: HTMLElement, context: MarkdownPostProcessorContext) => void | Promise<void>

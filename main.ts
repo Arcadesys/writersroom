@@ -65,6 +65,7 @@ export default class WritersRoomPlugin extends Plugin {
   private activeSourcePath: string | null = null;
   private activeAnchorId: string | null = null;
   private highlightRetryHandle: number | null = null;
+  private requestInProgress = false;
 
   private log(
     level: "debug" | "info" | "warn" | "error",
