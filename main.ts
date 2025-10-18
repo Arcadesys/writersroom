@@ -14,8 +14,8 @@ import {
   WorkspaceLeaf
 } from "obsidian";
 
-import { RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
-import { Decoration, DecorationSet, EditorView } from "@codemirror/view";
+import { RangeSetBuilder, StateEffect, StateField, EditorState, Facet, Compartment } from "@codemirror/state";
+import { Decoration, DecorationSet, EditorView, ViewPlugin, ViewUpdate, PluginValue } from "@codemirror/view";
 
 import {
   EditEntry,
@@ -26,6 +26,20 @@ import {
 } from "./editParser";
 
 const WR_VIEW_TYPE = "writersroom-sidebar";
+
+// Settings interface and defaults (moved here for facet)
+interface WritersRoomSettings {
+  apiKey: string;
+}
+
+const DEFAULT_SETTINGS: WritersRoomSettings = {
+  apiKey: ""
+};
+
+// Settings facet for reactive updates across editor extensions
+export const writersRoomSettingsFacet = Facet.define<WritersRoomSettings, WritersRoomSettings>({
+  combine: (values) => values[0] || DEFAULT_SETTINGS
+});
 
 interface EditorHighlightSpec {
   from: number;
@@ -57,8 +71,58 @@ export const writersRoomEditorHighlightsField = StateField.define<DecorationSet>
   }
 });
 
+// ViewPlugin for viewport-optimized rendering
+class WritersRoomViewPlugin implements PluginValue {
+  decorations: DecorationSet;
+
+  constructor(view: EditorView) {
+    this.decorations = this.buildDecorations(view);
+  }
+
+  update(update: ViewUpdate) {
+    // Rebuild decorations when:
+    // 1. Viewport changes (scrolling)
+    // 2. Document changes
+    // 3. Selection changes (for active highlight)
+    // 4. New highlights dispatched via effect
+    const hasNewHighlights = update.transactions.some(tr => 
+      tr.effects.some(e => e.is(setEditorHighlightsEffect))
+    );
+
+    if (update.viewportChanged || update.docChanged || update.selectionSet || hasNewHighlights) {
+      this.decorations = this.buildDecorations(update.view);
+    }
+  }
+
+  buildDecorations(view: EditorView): DecorationSet {
+    const builder = new RangeSetBuilder<Decoration>();
+    const highlights = view.state.field(writersRoomEditorHighlightsField);
+
+    // Only render decorations within visible viewport for performance
+    for (let { from, to } of view.visibleRanges) {
+      highlights.between(from, to, (decorFrom, decorTo, decoration) => {
+        builder.add(decorFrom, decorTo, decoration);
+      });
+    }
+
+    return builder.finish();
+  }
+
+  destroy() {
+    // Cleanup if needed
+  }
+}
+
+// Create the ViewPlugin with decorations spec
+const writersRoomViewPlugin = ViewPlugin.fromClass(WritersRoomViewPlugin, {
+  decorations: (plugin) => plugin.decorations
+});
+
 // Export the complete extension for registration
-export const writersRoomEditorExtension = [writersRoomEditorHighlightsField];
+export const writersRoomEditorExtension = [
+  writersRoomEditorHighlightsField,
+  writersRoomViewPlugin
+];
 
 function buildEditorHighlightDecorations(
   doc: unknown,
@@ -79,17 +143,17 @@ function buildEditorHighlightDecorations(
       continue;
     }
 
-    // Use Decoration.line() for line-level decorations
-    // This decorates the line itself rather than wrapping content
-    const decoration = Decoration.line({
+    // Use Decoration.mark() for inline text highlighting
+    // This highlights the actual text content with better visual clarity
+    const decoration = Decoration.mark({
       class: spec.className,
       attributes: spec.attributes
     });
     
-    console.info("[WritersRoom] Creating line decoration at position", spec.from, "with class", spec.className);
+    console.info("[WritersRoom] Creating mark decoration from", spec.from, "to", spec.to, "with class", spec.className);
     
-    // For line decorations, we only need the start position
-    builder.add(spec.from, spec.from, decoration);
+    // Mark decorations need both from and to positions
+    builder.add(spec.from, spec.to, decoration);
   }
 
   const result = builder.finish();
@@ -150,16 +214,9 @@ interface HighlightActivationOptions {
   editIndex?: number | null;
 }
 
-interface WritersRoomSettings {
-  apiKey: string;
-}
-
-const DEFAULT_SETTINGS: WritersRoomSettings = {
-  apiKey: ""
-};
-
 export default class WritersRoomPlugin extends Plugin {
   settings: WritersRoomSettings = DEFAULT_SETTINGS;
+  private settingsCompartment = new Compartment();
   private persistedEdits = new Map<string, PersistedEditEntry>();
   private editCache = new Map<string, EditPayload | null>();
   private editCachePromises = new Map<string, Promise<EditPayload | null>>();
@@ -450,11 +507,16 @@ export default class WritersRoomPlugin extends Plugin {
 
     this.injectStyles();
     
-    // Register editor extension for CodeMirror highlights
-    // Must be an array for proper extension registration
+    // Register editor extensions for CodeMirror
+    // Include settings facet for reactive updates
+    const editorExtensions = [
+      ...writersRoomEditorExtension,
+      this.settingsCompartment.of(writersRoomSettingsFacet.of(this.settings))
+    ];
+    
     (this as unknown as { registerEditorExtension: (extension: unknown) => void })
-      .registerEditorExtension(writersRoomEditorExtension);
-    this.logInfo("Registered editor highlight extension");
+      .registerEditorExtension(editorExtensions);
+    this.logInfo("Registered editor highlight extension with settings facet");
     
     // Delay to ensure editors pick up the extension
     setTimeout(() => {
@@ -2442,42 +2504,61 @@ export default class WritersRoomPlugin extends Plugin {
   async saveSettings() {
     await this.persistState();
     this.sidebarView?.setRequestState(this.requestInProgress);
+    
+    // Update settings facet in all editor views for reactive updates
+    const leaves = this.app.workspace.getLeavesOfType("markdown");
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (!(view instanceof MarkdownView)) continue;
+      
+      const editorView = this.getEditorViewFromMarkdownView(view);
+      if (!editorView) continue;
+      
+      editorView.dispatch({
+        effects: this.settingsCompartment.reconfigure(
+          writersRoomSettingsFacet.of(this.settings)
+        )
+      });
+    }
+    
+    this.logInfo("Updated settings in all editor views");
   }
 }
 
 export function buildWritersRoomCss(): string {
   return `
-      /* Line-level highlight styles */
-      .cm-line.writersroom-highlight {
+      /* Inline mark decoration styles for edit mode */
+      .writersroom-highlight {
         background-color: rgba(255, 235, 59, 0.15);
         cursor: pointer;
         transition: background-color 0.2s ease;
+        border-radius: 2px;
+        padding: 1px 2px;
       }
 
-      .cm-line.writersroom-highlight[data-wr-type="addition"] {
+      .writersroom-highlight[data-wr-type="addition"] {
         background-color: rgba(76, 175, 80, 0.15);
       }
 
-      .cm-line.writersroom-highlight[data-wr-type="subtraction"] {
+      .writersroom-highlight[data-wr-type="subtraction"] {
         background-color: rgba(244, 67, 54, 0.12);
       }
 
-      .cm-line.writersroom-highlight[data-wr-type="annotation"] {
+      .writersroom-highlight[data-wr-type="annotation"] {
         background-color: rgba(63, 81, 181, 0.12);
       }
 
-      .cm-line.writersroom-highlight:hover {
+      .writersroom-highlight:hover {
         background-color: rgba(255, 193, 7, 0.25);
       }
 
-      .cm-line.writersroom-highlight-active {
+      .writersroom-highlight-active {
         background-color: rgba(255, 193, 7, 0.3);
         border-left: 3px solid rgba(255, 193, 7, 0.8);
         padding-left: 4px;
       }
 
-      /* Preview mode highlights (keep existing) */
-      .writersroom-highlight,
+      /* Preview mode highlights (keep existing for reading mode) */
       span.writersroom-highlight {
         background-color: rgba(255, 235, 59, 0.2);
         cursor: pointer;
@@ -2486,17 +2567,14 @@ export function buildWritersRoomCss(): string {
         display: inline;
       }
 
-      .writersroom-highlight[data-wr-type="addition"],
       span.writersroom-highlight[data-wr-type="addition"] {
         background-color: rgba(76, 175, 80, 0.2);
       }
 
-      .writersroom-highlight[data-wr-type="subtraction"],
       span.writersroom-highlight[data-wr-type="subtraction"] {
         background-color: rgba(244, 67, 54, 0.15);
       }
 
-      .writersroom-highlight[data-wr-type="annotation"],
       span.writersroom-highlight[data-wr-type="annotation"] {
         background-color: rgba(63, 81, 181, 0.15);
       }

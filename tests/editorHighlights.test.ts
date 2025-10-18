@@ -11,8 +11,13 @@ import {
 describe("Writers Room editor highlights", () => {
   it("exposes CSS that targets CodeMirror editor highlights", () => {
     const css = buildWritersRoomCss();
-    expect(css).toMatch(/\.cm-editor\s+\.writersroom-highlight/);
-    expect(css).toMatch(/\.cm-editor\s+\.writersroom-highlight-active/);
+    // Mark decorations use .writersroom-highlight directly (not scoped to .cm-editor)
+    expect(css).toMatch(/\.writersroom-highlight\s*\{/);
+    expect(css).toMatch(/\.writersroom-highlight-active/);
+    // Check for type-specific styles
+    expect(css).toMatch(/\[data-wr-type="addition"\]/);
+    expect(css).toMatch(/\[data-wr-type="subtraction"\]/);
+    expect(css).toMatch(/\[data-wr-type="annotation"\]/);
   });
 
   it("adds mark decorations with writersroom metadata", () => {
