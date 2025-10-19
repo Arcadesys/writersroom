@@ -1,8 +1,8 @@
 export type EditType = "addition" | "subtraction" | "annotation" | "replacement" | "star";
-export type EditCategory = "flow" | "rhythm" | "sensory" | "punch";
+export type EditCategory = string;
 
 export interface EditEntry {
-  agent: "editor";
+  agent: string;
   anchor: string;
   line: number;
   type: EditType;
@@ -34,13 +34,6 @@ const EDIT_TYPES: ReadonlySet<EditType> = new Set([
   "annotation",
   "replacement",
   "star"
-]);
-
-const EDIT_CATEGORIES: ReadonlySet<EditCategory> = new Set([
-  "flow",
-  "rhythm",
-  "sensory",
-  "punch"
 ]);
 
 function assert(condition: unknown, message: string, path?: string): asserts condition {
@@ -115,8 +108,8 @@ function parseEdit(entry: unknown, index: number): EditEntry {
 
   const { agent, line, type, category, original_text, output } = entry;
 
-  assert(typeof agent === "string", "agent must be a string", `${path}.agent`);
-  assert(agent === "editor", "agent must be set to \"editor\"", `${path}.agent`);
+  assert(typeof agent === "string" && agent.trim().length > 0, "agent must be a non-empty string", `${path}.agent`);
+  const normalizedAgent = agent.trim();
 
   assert(typeof line === "number" && Number.isInteger(line), "line must be an integer", `${path}.line`);
   assert(line >= 1, "line must be at least 1", `${path}.line`);
@@ -125,8 +118,8 @@ function parseEdit(entry: unknown, index: number): EditEntry {
   const allowedTypes = Array.from(EDIT_TYPES).join(", ");
   assert(EDIT_TYPES.has(type as EditType), `type must be one of: ${allowedTypes}`, `${path}.type`);
 
-  assert(typeof category === "string", "category must be a string", `${path}.category`);
-  assert(EDIT_CATEGORIES.has(category as EditCategory), "category must be flow, rhythm, sensory, or punch", `${path}.category`);
+  assert(typeof category === "string" && category.trim().length > 0, "category must be a non-empty string", `${path}.category`);
+  const normalizedCategory = category.trim();
 
   assert(typeof original_text === "string", "original_text must be a string", `${path}.original_text`);
   assert(original_text.length > 0, "original_text cannot be empty", `${path}.original_text`);
@@ -154,12 +147,12 @@ function parseEdit(entry: unknown, index: number): EditEntry {
     normalizeAnchorCandidate((entry as Record<string, unknown>).id);
 
   return {
-    agent: "editor",
+    agent: normalizedAgent,
     anchor: createEditAnchorId(
       {
         line,
         type: type as EditType,
-        category: category as EditCategory,
+        category: normalizedCategory as EditCategory,
         original_text,
         output: output === null ? null : (output as string),
         anchor: anchorCandidate
@@ -168,7 +161,7 @@ function parseEdit(entry: unknown, index: number): EditEntry {
     ),
     line,
     type: type as EditType,
-    category: category as EditCategory,
+    category: normalizedCategory as EditCategory,
     original_text,
     output: output === null ? null : (output as string)
   };
@@ -232,6 +225,92 @@ function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
   }
 
   return combined;
+}
+
+function cloneEdit(edit: EditEntry): EditEntry {
+  return {
+    agent: edit.agent,
+    anchor: edit.anchor,
+    line: edit.line,
+    type: edit.type,
+    category: edit.category,
+    original_text: edit.original_text,
+    output: edit.output,
+    annotation: edit.annotation ?? null
+  };
+}
+
+function createEditSignature(edit: EditEntry): string {
+  const outputValue = edit.output ?? "__NULL__";
+  return [
+    edit.agent.trim().toLowerCase(),
+    edit.category.trim().toLowerCase(),
+    edit.type,
+    edit.line,
+    edit.original_text,
+    outputValue
+  ].join("|");
+}
+
+export function mergeEditPayloads(existing: EditPayload | null, incoming: EditPayload): EditPayload {
+  const baseSummary = incoming.summary?.trim().length ? incoming.summary : existing?.summary ?? "";
+
+  if (!existing) {
+    const incomingClones = incoming.edits.map((edit) => cloneEdit(edit));
+    const normalized = incomingClones.map((edit, index) => ({
+      ...edit,
+      anchor: createEditAnchorId(
+        {
+          line: edit.line,
+          type: edit.type,
+          category: edit.category,
+          original_text: edit.original_text,
+          output: edit.output,
+          anchor: edit.anchor
+        },
+        index
+      )
+    }));
+
+    return {
+      summary: baseSummary,
+      edits: normalized
+    };
+  }
+
+  const existingClones = existing.edits.map((edit) => cloneEdit(edit));
+  const signatures = new Set(existingClones.map((edit) => createEditSignature(edit)));
+
+  const appended: EditEntry[] = [];
+  for (const edit of incoming.edits) {
+    const clone = cloneEdit(edit);
+    const signature = createEditSignature(clone);
+    if (signatures.has(signature)) {
+      continue;
+    }
+    signatures.add(signature);
+    appended.push(clone);
+  }
+
+  const mergedEdits = [...existingClones, ...appended].map((edit, index) => ({
+    ...edit,
+    anchor: createEditAnchorId(
+      {
+        line: edit.line,
+        type: edit.type,
+        category: edit.category,
+        original_text: edit.original_text,
+        output: edit.output,
+        anchor: edit.anchor
+      },
+      index
+    )
+  }));
+
+  return {
+    summary: baseSummary,
+    edits: mergedEdits
+  };
 }
 
 export function parseEditPayload(raw: unknown): EditPayload {

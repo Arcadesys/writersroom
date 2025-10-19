@@ -201,6 +201,7 @@ import {
   EditPayload,
   ValidationError,
   createEditAnchorId,
+  mergeEditPayloads,
   parseEditPayload,
   parseEditPayloadFromString
 } from "./editParser";
@@ -384,16 +385,85 @@ class AudiconPlayer {
 // Settings interface and defaults (moved here for facet)
 type ColorScheme = "default" | "high-contrast" | "colorblind-friendly" | "muted" | "warm" | "cool";
 
+const DEFAULT_AGENT_PROMPT_FOLDER = "WritersRoom Agents";
+const DEFAULT_AGENT_IDS = ["flow", "lens", "punch"] as const;
+const MAX_NOTE_WORD_LIMIT = 4000;
+
+interface AgentPromptDefinition {
+  id: string;
+  label: string;
+  description: string;
+  content: string;
+  sourcePath: string;
+  model?: string;
+  temperature?: number;
+  order?: number;
+}
+
 interface WritersRoomSettings {
   apiKey: string;
   colorScheme: ColorScheme;
   audibleFeedback: boolean; // Enable/disable audicons
+  agentPromptFolder: string;
+  defaultAgentIds: string[];
 }
 
 const DEFAULT_SETTINGS: WritersRoomSettings = {
   apiKey: "",
   colorScheme: "default",
-  audibleFeedback: true
+  audibleFeedback: true,
+  agentPromptFolder: DEFAULT_AGENT_PROMPT_FOLDER,
+  defaultAgentIds: [...DEFAULT_AGENT_IDS]
+};
+
+const BUILTIN_AGENT_PROMPT_SEEDS: Array<{
+  id: string;
+  fileName: string;
+  label: string;
+  description: string;
+  body: string;
+  order: number;
+}> = [
+  {
+    id: "flow",
+    fileName: "flow.md",
+    label: "Flow",
+    description: "Smooth sentence-level clarity, cadence, and transitions while keeping the original voice.",
+    order: 1,
+    body: `You are the Flow editor. Review the draft line by line to smooth awkward phrasing, tighten redundancies, and ensure transitions feel natural. Keep sentences breathable, align cadence with the surrounding prose, and preserve the author's voice. Favor subtle adjustments that improve readability without altering story beats.`
+  },
+  {
+    id: "lens",
+    fileName: "lens.md",
+    label: "Lens",
+    description: "Deepen POV and sensory texture with vivid, in-character observations that feel lived-in.",
+    order: 2,
+    body: `You are the Lens editor. Look for opportunities to deepen the point of view and sensory texture. Suggest concrete details or interior reactions that sharpen what the viewpoint character notices. Maintain continuity with the draft while nudging language toward specificity and a tangible, lived-in perspective.`
+  },
+  {
+    id: "punch",
+    fileName: "punch.md",
+    label: "Punch",
+    description: "Heighten emotional impact and emphasis without tipping into melodrama or overwriting.",
+    order: 3,
+    body: `You are the Punch editor. Amplify emotional stakes and key moments with sharper diction and rhythm. Offer concise revisions that heighten tension or delight by switching to stronger verbs or imagery when it reinforces the scene. Ensure the energy matches the character and avoids melodrama.`
+  }
+];
+
+const AGENT_ALIAS_MAP: Record<string, string> = {
+  flow: "flow",
+  pacing: "flow",
+  rhythm: "flow",
+  cadence: "flow",
+  clarity: "flow",
+  lens: "lens",
+  sensory: "lens",
+  detail: "lens",
+  texture: "lens",
+  punch: "punch",
+  impact: "punch",
+  emphasis: "punch",
+  spark: "punch"
 };
 
 interface ColorPalette {
@@ -702,7 +772,7 @@ interface HighlightActivationOptions {
   origin?: SelectionOrigin;
 }
 
-type QuickPromptId = "punch-up-line" | "story-direction" | "ask-writers";
+type QuickPromptId = string;
 
 interface QuickPromptDefinition {
   id: QuickPromptId;
@@ -713,6 +783,7 @@ interface QuickPromptDefinition {
   model?: string;
   temperature?: number;
   format?: "markdown" | "json" | "text";
+  agentIds?: string[];
 }
 
 interface QuickPromptRunResult {
@@ -751,39 +822,12 @@ export default class WritersRoomPlugin extends Plugin {
   private requestProgressMessageIndex = -1;
   private requestProgressActiveLabel: string | null = null;
   audiconPlayer: AudiconPlayer | null = null; // Public for settings access
-  private readonly quickPromptDefinitions: QuickPromptDefinition[] = [
-    {
-      id: "punch-up-line",
-      label: "Punch up this line",
-      description: "Sharpen the selection with punchier alternatives and quick rationale.",
-      getSystemPrompt: () => `You are a nimble fiction line editor. When a writer gives you a short snippet, you propose two or three sharper rephrasings that keep the original intent but heighten rhythm, energy, and sensory detail. Keep voice consistent with the source. Respond in markdown as a numbered list. Each item must include the revised line in bold on the first line and a single-sentence rationale in italics on the next line.`,
-      buildUserMessage: (selection: string) => `Here is the snippet to improve:\n\n"""\n${selection.trim()}\n"""\n\nOffer two or three punchier rewrites following the required format.`,
-      model: "gpt-4.1-mini",
-      temperature: 0.7,
-      format: "markdown"
-    },
-    {
-      id: "story-direction",
-      label: "Give me ideas on where to go",
-      description: "Brainstorm next-scene directions anchored in the selected text.",
-      getSystemPrompt: () => `You are a collaborative story-room producer. Given an excerpt, suggest compelling next steps that the author could explore. Emphasize character motivation, tension, and sensory hooks. Respond in markdown using level-three headings for each idea (e.g., "### Idea 1"), followed by two concise bullet points: one summarizing the direction, one highlighting why it could resonate.`,
-      buildUserMessage: (selection: string) => `Treat the following excerpt as the current state of the draft:\n\n"""\n${selection.trim()}\n"""\n\nPropose three distinct directions that build naturally from this material.`,
-      model: "gpt-4.1-mini",
-      temperature: 0.8,
-      format: "markdown"
-    },
-    {
-      id: "ask-writers",
-      label: "Ask the Writers (selection)",
-      description: "Run the full editorial prompt against just the highlighted text.",
-      getSystemPrompt: () => this.getWritersSystemPrompt(),
-      buildUserMessage: (selection: string) => selection,
-      model: "gpt-5",
-      temperature: 0.2,
-      format: "json"
-    }
-  ];
+  private quickPromptDefinitions: QuickPromptDefinition[] = [];
   private quickPromptInProgress = false;
+  private agentPrompts: AgentPromptDefinition[] = [];
+  private agentPromptMap = new Map<string, AgentPromptDefinition>();
+  private activeRunAgentIds: string[] | null = null;
+  private lastAgentSelection: string[] | null = null;
 
   private log(
     level: "debug" | "info" | "warn" | "error",
@@ -860,6 +904,174 @@ export default class WritersRoomPlugin extends Plugin {
     return "";
   }
 
+  private normalizeAgentPromptFolder(value?: string | null): string {
+    const fallback = DEFAULT_AGENT_PROMPT_FOLDER;
+    if (typeof value !== "string") {
+      return fallback;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return fallback;
+    }
+
+    const normalized = trimmed
+      .replace(/\\/g, "/")
+      .replace(/^\/*/, "")
+      .replace(/\/*$/, "");
+
+    return normalized.length > 0 ? normalized : fallback;
+  }
+
+  private getAgentPromptFolder(): string {
+    return this.normalizeAgentPromptFolder(this.settings.agentPromptFolder);
+  }
+
+  private sanitizeAgentId(value: string): string {
+    if (!value) {
+      return "";
+    }
+
+    const normalized = value.replace(/[^a-zA-Z0-9\s_-]+/g, "").trim();
+    if (!normalized) {
+      return "";
+    }
+
+    return this.slugify(normalized);
+  }
+
+  private toAgentDisplayName(id: string): string {
+    if (!id) {
+      return "Untitled Agent";
+    }
+
+    return id
+      .split(/[-_]/g)
+      .filter((segment) => segment.length > 0)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(" ");
+  }
+
+  private normalizeAgentIds(value: unknown): string[] {
+    if (!Array.isArray(value)) {
+      return [...DEFAULT_AGENT_IDS];
+    }
+
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const entry of value) {
+      if (typeof entry !== "string") {
+        continue;
+      }
+      const id = this.sanitizeAgentId(entry);
+      if (!id || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      normalized.push(id);
+    }
+
+    if (normalized.length === 0) {
+      return [...DEFAULT_AGENT_IDS];
+    }
+
+    return normalized;
+  }
+
+  private isAgentPromptPath(path: string): boolean {
+    const folder = this.getAgentPromptFolder();
+    if (!folder) {
+      return false;
+    }
+    return path === folder || path.startsWith(`${folder}/`);
+  }
+
+  private isSupportedAgentPromptFile(path: string): boolean {
+    const lower = path.toLowerCase();
+    return (
+      lower.endsWith(".md") ||
+      lower.endsWith(".prompt") ||
+      lower.endsWith(".prompt.md") ||
+      lower.endsWith(".txt")
+    );
+  }
+
+  private resolveAgentIds(preferred?: string[] | null): string[] {
+    const available = this.agentPrompts.map((agent) => agent.id);
+    if (!Array.isArray(preferred) || preferred.length === 0) {
+      return available;
+    }
+
+    const seen = new Set<string>();
+    const normalized: string[] = [];
+    for (const raw of preferred) {
+      const id = this.sanitizeAgentId(raw);
+      if (!id || !this.agentPromptMap.has(id) || seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      normalized.push(id);
+    }
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+
+    return available;
+  }
+
+  private resolveAgentDefinitions(preferred?: string[] | null): AgentPromptDefinition[] {
+    const ids = this.resolveAgentIds(preferred);
+    const result: AgentPromptDefinition[] = [];
+    for (const id of ids) {
+      const agent = this.agentPromptMap.get(id);
+      if (agent) {
+        result.push(agent);
+      }
+    }
+    return result;
+  }
+
+  private normalizeAgentIdentifier(value: unknown, activeAgentIds: string[]): string | null {
+    if (typeof value !== "string") {
+      return activeAgentIds[0] ?? null;
+    }
+
+    const trimmed = value.trim();
+    if (!trimmed) {
+      return activeAgentIds[0] ?? null;
+    }
+
+    const sanitized = this.sanitizeAgentId(trimmed);
+    if (sanitized && activeAgentIds.includes(sanitized)) {
+      return sanitized;
+    }
+
+    if (sanitized) {
+      const aliasTarget = AGENT_ALIAS_MAP[sanitized];
+      if (aliasTarget && activeAgentIds.includes(aliasTarget)) {
+        return aliasTarget;
+      }
+    }
+
+    for (const id of activeAgentIds) {
+      const agent = this.agentPromptMap.get(id);
+      if (!agent) {
+        continue;
+      }
+      const labelMatch = this.sanitizeAgentId(agent.label);
+      if (labelMatch && labelMatch === sanitized) {
+        return agent.id;
+      }
+    }
+
+    if (activeAgentIds.length === 1) {
+      return activeAgentIds[0];
+    }
+
+    return null;
+  }
+
   getResolvedApiKey(): string {
     const fromEnv = this.readEnvVar("WRITERSROOM_API_KEY");
     if (fromEnv) {
@@ -889,14 +1101,24 @@ export default class WritersRoomPlugin extends Plugin {
 
     if ("settings" in record && record.settings && typeof record.settings === "object") {
       const settingsRaw = record.settings as Record<string, unknown>;
+      const agentFolderRaw =
+        typeof settingsRaw.agentPromptFolder === "string"
+          ? settingsRaw.agentPromptFolder
+          : DEFAULT_SETTINGS.agentPromptFolder;
       const settings: WritersRoomSettings = {
         ...DEFAULT_SETTINGS,
         apiKey: typeof settingsRaw.apiKey === "string" ? settingsRaw.apiKey : DEFAULT_SETTINGS.apiKey,
-        colorScheme: 
-          typeof settingsRaw.colorScheme === "string" && 
+        colorScheme:
+          typeof settingsRaw.colorScheme === "string" &&
           ["default", "high-contrast", "colorblind-friendly", "muted", "warm", "cool"].includes(settingsRaw.colorScheme)
             ? (settingsRaw.colorScheme as ColorScheme)
-            : DEFAULT_SETTINGS.colorScheme
+            : DEFAULT_SETTINGS.colorScheme,
+        audibleFeedback:
+          typeof settingsRaw.audibleFeedback === "boolean"
+            ? settingsRaw.audibleFeedback
+            : DEFAULT_SETTINGS.audibleFeedback,
+        agentPromptFolder: this.normalizeAgentPromptFolder(agentFolderRaw),
+        defaultAgentIds: this.normalizeAgentIds(settingsRaw.defaultAgentIds)
       };
 
       const editsRaw = record.edits;
@@ -916,6 +1138,367 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     return { settings: { ...DEFAULT_SETTINGS }, edits: {} };
+  }
+
+  private async loadAgentPrompts(): Promise<void> {
+    const folder = this.getAgentPromptFolder();
+    this.agentPrompts = [];
+    this.agentPromptMap = new Map();
+    this.quickPromptDefinitions = this.buildStaticQuickPromptDefinitions();
+
+    try {
+      await this.ensureFolder(folder);
+    } catch (error) {
+      this.logError("Failed to ensure agent prompt folder exists.", error, { folder });
+      return;
+    }
+
+    try {
+      await this.ensureDefaultAgentPrompts(folder);
+    } catch (error) {
+      this.logWarn("Unable to seed default agent prompts.", error);
+    }
+
+    const adapter = this.getVault().adapter;
+    let listing: { files: string[]; folders: string[] };
+    try {
+      listing = await adapter.list(folder);
+    } catch (error) {
+      this.logError("Failed to list agent prompt folder.", error, { folder });
+      return;
+    }
+
+    const prompts: AgentPromptDefinition[] = [];
+    for (const filePath of listing.files ?? []) {
+      if (!this.isSupportedAgentPromptFile(filePath)) {
+        continue;
+      }
+
+      try {
+        const contents = await adapter.read(filePath);
+        const parsed = this.parseAgentPromptFile(filePath, contents);
+        if (parsed) {
+          prompts.push(parsed);
+        }
+      } catch (error) {
+        this.logWarn("Failed to read agent prompt file.", error, { filePath });
+      }
+    }
+
+    prompts.sort((a, b) => {
+      const orderA = Number.isFinite(a.order) ? (a.order as number) : 1000;
+      const orderB = Number.isFinite(b.order) ? (b.order as number) : 1000;
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      return a.label.localeCompare(b.label, undefined, { sensitivity: "base" });
+    });
+
+    this.agentPrompts = prompts;
+    this.agentPromptMap = new Map(prompts.map((prompt) => [prompt.id, prompt]));
+
+    const retainedDefaultAgents = this.settings.defaultAgentIds.filter((id) => this.agentPromptMap.has(id));
+    if (retainedDefaultAgents.length === 0 && prompts.length > 0) {
+      const builtinDefaults = prompts
+        .filter((prompt) => (DEFAULT_AGENT_IDS as readonly string[]).includes(prompt.id))
+        .map((prompt) => prompt.id);
+      if (builtinDefaults.length > 0) {
+        this.settings.defaultAgentIds = builtinDefaults;
+      } else {
+        this.settings.defaultAgentIds = prompts.slice(0, Math.min(3, prompts.length)).map((prompt) => prompt.id);
+      }
+      this.persistStateSafely();
+    } else if (retainedDefaultAgents.length !== this.settings.defaultAgentIds.length) {
+      this.settings.defaultAgentIds = retainedDefaultAgents;
+      this.persistStateSafely();
+    }
+
+    this.rebuildQuickPromptsFromAgents();
+  }
+
+  private async ensureDefaultAgentPrompts(folder: string): Promise<void> {
+    const adapter = this.getVault().adapter;
+    for (const seed of BUILTIN_AGENT_PROMPT_SEEDS) {
+      const path = `${folder}/${seed.fileName}`;
+      try {
+        const exists = await adapter.exists(path);
+        if (exists) {
+          continue;
+        }
+      } catch (error) {
+        this.logWarn("Failed to check existence of default agent prompt.", error, { path });
+        continue;
+      }
+
+      try {
+        await this.writeFile(path, this.buildAgentPromptSeedContent(seed));
+      } catch (error) {
+        this.logWarn("Failed to write default agent prompt.", error, { path });
+      }
+    }
+  }
+
+  private buildAgentPromptSeedContent(seed: (typeof BUILTIN_AGENT_PROMPT_SEEDS)[number]): string {
+    const lines = [
+      "---",
+      `id: ${seed.id}`,
+      `label: ${seed.label}`,
+      `description: ${seed.description}`,
+      `order: ${seed.order}`,
+      "---",
+      "",
+      seed.body.trim(),
+      ""
+    ];
+    return lines.join("\n");
+  }
+
+  private parseAgentPromptFile(filePath: string, contents: string): AgentPromptDefinition | null {
+    const raw = typeof contents === "string" ? contents : "";
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      this.logWarn("Skipping empty agent prompt file.", { filePath });
+      return null;
+    }
+
+    let metaBlock: string | null = null;
+    let body = raw;
+    const frontMatterMatch = raw.match(/^---\s*\r?\n([\s\S]*?)\r?\n---\s*\r?\n?/);
+    if (frontMatterMatch) {
+      metaBlock = frontMatterMatch[1];
+      body = raw.slice(frontMatterMatch[0].length);
+    }
+
+    const metadata: Record<string, string> = {};
+    if (metaBlock) {
+      const lines = metaBlock.split(/\r?\n/);
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine || trimmedLine.startsWith("#")) {
+          continue;
+        }
+        const index = trimmedLine.indexOf(":");
+        if (index === -1) {
+          continue;
+        }
+        const key = trimmedLine.slice(0, index).trim().toLowerCase();
+        if (!key) {
+          continue;
+        }
+        const value = trimmedLine.slice(index + 1).trim().replace(/^["']|["']$/g, "");
+        metadata[key] = value;
+      }
+    }
+
+    const fileName = filePath.split("/").pop() ?? filePath;
+    const stem = fileName
+      .replace(/\.md$/i, "")
+      .replace(/\.txt$/i, "")
+      .replace(/\.prompt$/i, "");
+    const id = this.sanitizeAgentId(metadata["id"] ?? stem);
+    if (!id) {
+      this.logWarn("Skipping agent prompt with missing identifier.", { filePath });
+      return null;
+    }
+
+    const label = metadata["label"] && metadata["label"].length > 0 ? metadata["label"] : this.toAgentDisplayName(id);
+    const rawDescription = metadata["description"] ?? "";
+    const bodyTrimmed = body.trim();
+    if (!bodyTrimmed) {
+      this.logWarn("Skipping agent prompt without body content.", { filePath });
+      return null;
+    }
+    const description =
+      rawDescription.length > 0 ? rawDescription : this.extractAgentDescriptionFromBody(bodyTrimmed, label);
+
+    let model: string | undefined;
+    if (metadata["model"] && metadata["model"].length > 0) {
+      model = metadata["model"];
+    }
+
+    let temperature: number | undefined;
+    if (metadata["temperature"]) {
+      const parsedTemp = Number(metadata["temperature"]);
+      if (Number.isFinite(parsedTemp)) {
+        temperature = parsedTemp;
+      }
+    }
+
+    let order: number | undefined;
+    if (metadata["order"]) {
+      const parsedOrder = Number(metadata["order"]);
+      if (Number.isFinite(parsedOrder)) {
+        order = parsedOrder;
+      }
+    } else {
+      const builtinIndex = (DEFAULT_AGENT_IDS as readonly string[]).indexOf(id);
+      if (builtinIndex !== -1) {
+        order = builtinIndex + 1;
+      }
+    }
+
+    return {
+      id,
+      label,
+      description,
+      content: bodyTrimmed,
+      sourcePath: filePath,
+      model,
+      temperature,
+      order
+    };
+  }
+
+  private extractAgentDescriptionFromBody(body: string, label: string): string {
+    const lines = body.split(/\r?\n/).map((line) => line.trim());
+    const firstContentLine = lines.find((line) => line.length > 0) ?? "";
+    if (!firstContentLine) {
+      return `Custom prompt for ${label}`;
+    }
+
+    if (firstContentLine.length <= 140) {
+      return firstContentLine;
+    }
+
+    return `${firstContentLine.slice(0, 137)}…`;
+  }
+
+  private rebuildQuickPromptsFromAgents(): void {
+    const agentQuickPrompts = this.agentPrompts.map((agent) => this.createAgentQuickPromptDefinition(agent));
+    const staticPrompts = this.buildStaticQuickPromptDefinitions();
+
+    this.quickPromptDefinitions = [...agentQuickPrompts, ...staticPrompts];
+  }
+
+  private buildStaticQuickPromptDefinitions(): QuickPromptDefinition[] {
+    const prompts: QuickPromptDefinition[] = [
+      {
+        id: "punch-up-line",
+        label: "Punch up this line",
+        description: "Sharpen the selection with punchier alternatives and quick rationale.",
+        getSystemPrompt: () =>
+          `You are a nimble fiction line editor. When a writer gives you a short snippet, you propose two or three sharper rephrasings that keep the original intent but heighten rhythm, energy, and sensory detail. Keep voice consistent with the source. Respond in markdown as a numbered list. Each item must include the revised line in bold on the first line and a single-sentence rationale in italics on the next line.`,
+        buildUserMessage: (selection: string) =>
+          `Here is the snippet to improve:\n\n"""\n${selection.trim()}\n"""\n\nOffer two or three punchier rewrites following the required format.`,
+        model: "gpt-4.1-mini",
+        temperature: 0.7,
+        format: "markdown"
+      },
+      {
+        id: "story-direction",
+        label: "Give me ideas on where to go",
+        description: "Brainstorm next-scene directions anchored in the selected text.",
+        getSystemPrompt: () =>
+          `You are a collaborative story-room producer. Given an excerpt, suggest compelling next steps that the author could explore. Emphasize character motivation, tension, and sensory hooks. Respond in markdown using level-three headings for each idea (e.g., "### Idea 1"), followed by two concise bullet points: one summarizing the direction, one highlighting why it could resonate.`,
+        buildUserMessage: (selection: string) =>
+          `Treat the following excerpt as the current state of the draft:\n\n"""\n${selection.trim()}\n"""\n\nPropose three distinct directions that build naturally from this material.`,
+        model: "gpt-4.1-mini",
+        temperature: 0.8,
+        format: "markdown"
+      }
+    ];
+
+    const defaultAgents = this.resolveAgentIds(this.settings.defaultAgentIds);
+    if (defaultAgents.length > 0) {
+      prompts.push({
+        id: "ask-writers",
+        label: "Ask the Writers (selection)",
+        description: "Run the full editorial crew against just the highlighted text.",
+        getSystemPrompt: () => this.buildSystemPromptForAgents(defaultAgents),
+        buildUserMessage: (selection: string) => selection,
+        model: "gpt-5",
+        temperature: 0.2,
+        format: "json",
+        agentIds: [...defaultAgents]
+      });
+    }
+
+    return prompts;
+  }
+
+  private createAgentQuickPromptDefinition(agent: AgentPromptDefinition): QuickPromptDefinition {
+    const agentId = agent.id;
+    return {
+      id: `agent-${agentId}`,
+      label: `${agent.label} pass (selection)`,
+      description: agent.description,
+      getSystemPrompt: () => this.buildSystemPromptForAgents([agentId]),
+      buildUserMessage: (selection: string) => selection,
+      model: agent.model ?? "gpt-4.1-mini",
+      temperature: agent.temperature ?? 0.4,
+      format: "json",
+      agentIds: [agentId]
+    };
+  }
+
+  private async reloadAgentPrompts(reason: string): Promise<void> {
+    try {
+      await this.loadAgentPrompts();
+      this.log("debug", "Agent prompts reloaded.", { reason, count: this.agentPrompts.length });
+    } catch (error) {
+      this.logError("Failed to reload agent prompts.", error, { reason });
+    }
+  }
+
+  private async promptForAgentSelection(): Promise<string[] | null> {
+    if (this.agentPrompts.length === 0) {
+      return null;
+    }
+
+    const initial = this.resolveAgentIds(this.lastAgentSelection ?? this.settings.defaultAgentIds);
+
+    return new Promise<string[] | null>((resolve) => {
+      const modal = new WritersRoomAgentPickerModal(
+        this.app,
+        this.agentPrompts,
+        initial,
+        (choice) => {
+          if (!choice || choice.length === 0) {
+            resolve(null);
+            return;
+          }
+          const normalized = this.resolveAgentIds(choice);
+          resolve(normalized.length > 0 ? normalized : null);
+        }
+      );
+      modal.open();
+    });
+  }
+
+  getAgentPromptDefinitions(): AgentPromptDefinition[] {
+    return this.agentPrompts.map((agent) => ({ ...agent }));
+  }
+
+  async updateAgentPromptFolder(folder: string): Promise<void> {
+    const normalized = this.normalizeAgentPromptFolder(folder);
+    if (normalized === this.settings.agentPromptFolder) {
+      return;
+    }
+
+    this.settings.agentPromptFolder = normalized;
+    await this.saveSettings();
+    await this.loadAgentPrompts();
+  }
+
+  async setDefaultAgentIds(agentIds: string[]): Promise<void> {
+    const normalized = this.resolveAgentIds(agentIds);
+    if (normalized.length === 0) {
+      this.logWarn("Attempted to set default agent list, but no valid agents were provided.");
+      return;
+    }
+
+    const current = this.settings.defaultAgentIds;
+    const identical =
+      current.length === normalized.length &&
+      current.every((value, index) => value === normalized[index]);
+    if (identical) {
+      return;
+    }
+
+    this.settings.defaultAgentIds = [...normalized];
+    this.lastAgentSelection = [...normalized];
+    await this.saveSettings();
+    this.rebuildQuickPromptsFromAgents();
   }
 
   private normalizePersistedEntry(
@@ -1112,6 +1695,7 @@ export default class WritersRoomPlugin extends Plugin {
 
   async onload() {
     await this.loadSettings();
+    await this.loadAgentPrompts();
 
     // Initialize audicon player for accessibility
     this.audiconPlayer = new AudiconPlayer();
@@ -3116,8 +3700,8 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     const wordCount = trimmed.split(/\s+/).length;
-    if (wordCount > 4000) {
-      new Notice(`Selection is too long (${wordCount} words). Limit to 4000 words or fewer.`);
+    if (wordCount > MAX_NOTE_WORD_LIMIT) {
+      new Notice(`Selection is too long (${wordCount} words). Limit to ${MAX_NOTE_WORD_LIMIT} words or fewer.`);
       return;
     }
 
@@ -3190,6 +3774,14 @@ export default class WritersRoomPlugin extends Plugin {
       return;
     }
 
+    const promptAgentIds = prompt.agentIds ? this.resolveAgentIds(prompt.agentIds) : [];
+    if (promptAgentIds.length > 0) {
+      this.activeRunAgentIds = [...promptAgentIds];
+      this.lastAgentSelection = [...promptAgentIds];
+    } else {
+      this.activeRunAgentIds = null;
+    }
+
     const model = prompt.model ?? "gpt-4.1-mini";
     const temperature = prompt.temperature ?? 0.6;
     const loadingNotice = new Notice(`Running "${prompt.label}"…`, 0);
@@ -3260,6 +3852,7 @@ export default class WritersRoomPlugin extends Plugin {
     } finally {
       loadingNotice.hide();
       this.quickPromptInProgress = false;
+      this.activeRunAgentIds = null;
     }
   }
 
@@ -3401,7 +3994,74 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private getWritersSystemPrompt(): string {
+  private buildSystemPromptForAgents(agentIds?: string[] | null): string {
+    const agents = this.resolveAgentDefinitions(agentIds);
+    if (agents.length === 0) {
+      return this.buildLegacyWritersPrompt();
+    }
+
+    const rosterSummary = agents
+      .map((agent, index) => `${index + 1}. ${agent.label} (${agent.id}) — ${agent.description}`)
+      .join("\n");
+
+    const charterSections = agents
+      .map((agent) => {
+        const charter = agent.content.trim();
+        const header = `### ${agent.label} (${agent.id})`;
+        return charter ? `${header}\n${charter}` : header;
+      })
+      .join("\n\n");
+
+    const categoryOptions = agents.map((agent) => `"${agent.id}"`).join(", ");
+    const categoryGuidelines = agents
+      .map((agent, index) => `  ${index + 1}. **${agent.id}** — ${agent.description}`)
+      .join("\n");
+
+    return `You are "editor", the showrunner of a line-level prose editing crew. Your mission is to make *small, targeted* enhancements to the draft while preserving the author's intent and voice.
+
+IMPORTANT: Narrate your reasoning privately before finalizing edits so the UI can surface progress updates. Begin with a concise checklist (3–7 bullets) of the sub-tasks you'll perform.
+
+---
+
+Active specialists for this run:
+${rosterSummary}
+
+Each specialist follows this charter:
+${charterSections}
+
+---
+
+### GLOBAL EDITING RULES
+- Work line by line; blank lines are untouchable.
+- Offer only the smallest necessary adjustments aligned with each active agent's charter.
+- Maintain continuity for voice, tense, POV, timeline, and factual details.
+- Use "star" edits to celebrate exemplary lines worth keeping.
+- Validate every revision to ensure it delivers the intended improvement; self-correct if it does not.
+
+### STRUCTURED RESPONSE
+Return **only** a JSON object with:
+- "summary": 1–2 sentence editorial overview written in the collective voice of the crew lead.
+- "edits": array of edit objects, each including:
+  - "agent": agent id responsible for the change (choose from ${categoryOptions})
+  - "line": integer (≥ 1) for the affected line in the input
+  - "type": "addition", "replacement", "subtraction", "annotation", or "star"
+  - "category": same value as "agent" (choose from ${categoryOptions})
+  - "original_text": exact snippet from the source that you're responding to
+  - "output": revised text, annotation, or null (null only for "subtraction")
+
+Category meaning:
+${categoryGuidelines}
+
+If the input is blank or malformed, return:
+{
+  "edits": [],
+  "summary": "Input was malformed or blank; no edits performed."
+}
+
+Do not include any commentary outside the JSON response.`;
+  }
+
+  private buildLegacyWritersPrompt(): string {
     return `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
 
 IMPORTANT: Use your reasoning/thinking process to narrate your editorial thought process as you work. Share brief observations about what you notice (rhythm issues, sensory opportunities, pacing concerns) as you read through the text. This helps the writer understand your editorial perspective.
@@ -3488,24 +4148,24 @@ Malformed or blank input example:
     });
   }
 
-  private async clearOutstandingEditsBeforeRequest(
-    sourcePath: string
+  private async confirmAppendExistingEdits(
+    sourcePath: string,
+    existingPayload: EditPayload | null
   ): Promise<boolean> {
-    const payload = await this.getEditPayloadForSource(sourcePath);
-    if (!payload || payload.edits.length === 0) {
+    if (!existingPayload || existingPayload.edits.length === 0) {
       return true;
     }
 
-    const warningMessage =
-      "Requesting new Writers Room edits will delete the existing suggestions for this note. Continue?";
+    const promptMessage =
+      "Existing Writers Room edits will be kept and new suggestions will be added to them. Continue?";
 
     let proceed = true;
     if (typeof window !== "undefined" && typeof window.confirm === "function") {
-      proceed = window.confirm(warningMessage);
+      proceed = window.confirm(promptMessage);
     } else {
-      this.logWarn("Confirmation prompt unavailable; clearing outstanding edits automatically.", {
+      this.logWarn("Confirmation prompt unavailable; appending edits automatically.", {
         sourcePath,
-        existingEdits: payload.edits.length
+        existingEdits: existingPayload.edits.length
       });
     }
 
@@ -3514,17 +4174,6 @@ Malformed or blank input example:
       return false;
     }
 
-    const persisted = this.persistedEdits.get(sourcePath);
-    const editsPath = persisted?.editsPath ?? this.getEditsPathForSource(sourcePath);
-
-    this.removePersistedEdit(sourcePath, { cacheValue: null });
-
-    if (editsPath) {
-      await this.deleteFileIfExists(editsPath);
-    }
-
-    void this.refreshSidebarForActiveFile();
-    new Notice("Previous Writers Room edits deleted.");
     return true;
   }
 
@@ -3565,38 +4214,73 @@ Malformed or blank input example:
 
     // Check word count limit
     const wordCount = noteContents.trim().split(/\s+/).length;
-    if (wordCount > 4000) {
-      new Notice(`Your note is too long (${wordCount} words). Please limit to 4000 words or less.`);
+    if (wordCount > MAX_NOTE_WORD_LIMIT) {
+      new Notice(`Your note is too long (${wordCount} words). Please limit to ${MAX_NOTE_WORD_LIMIT} words or less.`);
+      return;
+    }
+
+    if (this.agentPrompts.length === 0) {
+      new Notice("No Writers Room agents are configured. Add prompt files in the WritersRoom Agents folder.");
+      return;
+    }
+
+    let activeAgentIds: string[];
+    if (this.agentPrompts.length === 1) {
+      activeAgentIds = [this.agentPrompts[0].id];
+    } else {
+      const picked = await this.promptForAgentSelection();
+      if (!picked) {
+        new Notice("Cancelled asking the Writers.");
+        return;
+      }
+      activeAgentIds = picked;
+    }
+
+    const agentDefinitions = this.resolveAgentDefinitions(activeAgentIds);
+    if (agentDefinitions.length === 0) {
+      new Notice("Selected agents could not be loaded. Check your Writers Room agent prompts.");
+      return;
+    }
+
+    activeAgentIds = agentDefinitions.map((agent) => agent.id);
+    this.lastAgentSelection = [...activeAgentIds];
+    const agentNames = agentDefinitions.map((agent) => agent.label).join(", ");
+
+    const existingPayload = await this.getEditPayloadForSource(file.path);
+    const proceed = await this.confirmAppendExistingEdits(file.path, existingPayload);
+    if (!proceed) {
       return;
     }
 
     this.activeSourcePath = file.path;
     this.activeAnchorId = null;
     this.activeEditIndex = null;
-    this.activePayload = null;
-
-    const cleared = await this.clearOutstandingEditsBeforeRequest(file.path);
-    if (!cleared) {
-      return;
-    }
+    this.activePayload = existingPayload ?? null;
 
     this.resetRequestProgress();
 
     await this.ensureSidebar({
       sourcePath: file.path,
-      payload: null,
+      payload: existingPayload ?? null,
       selectedAnchorId: null
     });
 
     this.setRequestState(true);
-    this.startRequestProgress(file.path, "The Writers are reviewing your work. This can take up to five minutes…");
+    const initialProgressLabel =
+      agentDefinitions.length === 1
+        ? `${agentDefinitions[0].label} is reviewing your work. This can take up to five minutes…`
+        : `The Writers (${agentNames}) are reviewing your work. This can take up to five minutes…`;
+    this.startRequestProgress(file.path, initialProgressLabel);
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
     // Play request start audicon for accessibility
     this.audiconPlayer?.play("request-start");
 
+    const previousEditCount = existingPayload?.edits.length ?? 0;
+
     try {
-      const systemPrompt = this.getWritersSystemPrompt();
+      const systemPrompt = this.buildSystemPromptForAgents(activeAgentIds);
+      this.activeRunAgentIds = [...activeAgentIds];
 
       const fetchImpl: typeof fetch | null =
         typeof fetch !== "undefined"
@@ -3742,27 +4426,30 @@ Malformed or blank input example:
         throw new Error("OpenAI response did not include a JSON payload.");
       }
 
-    this.advanceRequestProgress("Finalizing your edits…");
+      this.advanceRequestProgress("Finalizing your edits…");
 
-    const payload = this.parseAiPayload(jsonText);
+      const newPayload = this.parseAiPayload(jsonText);
+      const mergedPayload = mergeEditPayloads(existingPayload ?? null, newPayload);
+      const totalEditsCount = mergedPayload.edits.length;
+      const newEditsCount = totalEditsCount - previousEditCount;
 
       await this.ensureFolder("edits");
-      await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
+      await this.writeFile(editsPath, JSON.stringify(mergedPayload, null, 2) + "\n");
 
-      await this.persistEditsForSource(file.path, payload, { editsPath });
+      await this.persistEditsForSource(file.path, mergedPayload, { editsPath });
       this.editCachePromises.delete(file.path);
       this.activeSourcePath = file.path;
-      this.activePayload = payload;
+      this.activePayload = mergedPayload;
 
       this.logInfo("Writers Room edits generated.", {
         file: file.path,
-        edits: payload.edits.length
+        newEdits: newEditsCount,
+        totalEdits: totalEditsCount
       });
 
-      const editsCount = payload.edits.length;
       const progressCompletionMessage =
-        editsCount > 0
-          ? `Writers delivered ${editsCount} edit${editsCount === 1 ? "" : "s"}.`
+        newEditsCount > 0
+          ? `Writers added ${newEditsCount} new edit${newEditsCount === 1 ? "" : "s"} (${totalEditsCount} total).`
           : "Writers responded without new edits.";
 
       this.completeRequestProgress(progressCompletionMessage);
@@ -3770,10 +4457,16 @@ Malformed or blank input example:
       // Play request complete audicon for accessibility
       this.audiconPlayer?.play("request-complete");
 
-      if (editsCount > 0) {
-        const firstAnchor = this.getAnchorForEdit(payload.edits[0], 0);
+      if (totalEditsCount > 0) {
+        const firstIndex = newEditsCount > 0 ? previousEditCount : 0;
+        const firstAnchor = this.getAnchorForEdit(mergedPayload.edits[firstIndex], firstIndex);
         await this.selectEdit(file.path, firstAnchor, origin);
-        new Notice(`Writers provided ${editsCount} edit${editsCount === 1 ? "" : "s"}.`);
+        const noticeCount = newEditsCount > 0 ? newEditsCount : totalEditsCount;
+        const noticeLabel =
+          newEditsCount > 0
+            ? `Writers added ${noticeCount} new edit${noticeCount === 1 ? "" : "s"}.`
+            : `No new edits; ${totalEditsCount} suggestion${totalEditsCount === 1 ? "" : "s"} available.`;
+        new Notice(noticeLabel);
       } else {
         await this.refreshSidebarForActiveFile();
         new Notice("Writers responded without specific edits.");
@@ -3791,6 +4484,7 @@ Malformed or blank input example:
     } finally {
       loadingNotice.hide();
       this.setRequestState(false);
+      this.activeRunAgentIds = null;
     }
   }
 
@@ -3877,13 +4571,27 @@ Malformed or blank input example:
 
     const record = { ...(entry as Record<string, unknown>) };
 
-    if (typeof record.agent !== "string" || record.agent.trim().length === 0) {
-      this.logWarn("Setting missing agent to 'editor'.", { index, agent: record.agent });
-      record.agent = "editor";
-    } else if (record.agent.trim().toLowerCase() !== "editor") {
-      this.logWarn("Normalizing agent value to 'editor'.", { index, agent: record.agent });
-      record.agent = "editor";
+    const activeAgentIds =
+      this.activeRunAgentIds && this.activeRunAgentIds.length > 0
+        ? [...this.activeRunAgentIds]
+        : this.resolveAgentIds(this.settings.defaultAgentIds);
+    const fallbackAgentId = activeAgentIds[0] ?? "editor";
+    const normalizationIds = activeAgentIds.length > 0 ? activeAgentIds : [fallbackAgentId];
+
+    let agentId = this.normalizeAgentIdentifier(record.agent, normalizationIds);
+    if (!agentId) {
+      if (typeof record.agent !== "string" || record.agent.trim().length === 0) {
+        this.logWarn("Setting missing agent to fallback specialist.", { index, fallback: fallbackAgentId });
+      } else {
+        this.logWarn("Normalizing agent value to fallback specialist.", {
+          index,
+          agent: record.agent,
+          fallback: fallbackAgentId
+        });
+      }
+      agentId = fallbackAgentId;
     }
+    record.agent = agentId;
 
     const typeLookup: Record<string, string> = {
       addition: "addition",
@@ -3912,20 +4620,11 @@ Malformed or blank input example:
       record.type = typeLookup[normalized] ?? normalized;
     }
 
-    const categoryLookup: Record<string, string> = {
-      flow: "flow",
-      pacing: "flow",
-      rhythm: "rhythm",
-      cadence: "rhythm",
-      sensory: "sensory",
-      imagery: "sensory",
-      punch: "punch",
-      impact: "punch"
-    };
-
     if (typeof record.category === "string") {
-      const normalized = record.category.toLowerCase().trim();
-      record.category = categoryLookup[normalized] ?? normalized;
+      const categoryId = this.normalizeAgentIdentifier(record.category, normalizationIds) ?? agentId;
+      record.category = categoryId;
+    } else {
+      record.category = agentId;
     }
 
     if (!("original_text" in record) || typeof record.original_text !== "string") {
@@ -4209,6 +4908,11 @@ Malformed or blank input example:
   }
 
   private async onVaultModify(file: TFile): Promise<void> {
+    if (this.isAgentPromptPath(file.path)) {
+      await this.reloadAgentPrompts("modify");
+      return;
+    }
+
     if (this.isEditsJsonPath(file.path)) {
       await this.syncPersistedEditFromJson(file.path);
       if (this.activeSourcePath) {
@@ -4227,6 +4931,11 @@ Malformed or blank input example:
   }
 
   private onVaultDelete(file: TFile): void {
+    if (this.isAgentPromptPath(file.path)) {
+      void this.reloadAgentPrompts("delete");
+      return;
+    }
+
     if (this.isEditsJsonPath(file.path)) {
       const sourcePath = this.findSourcePathByEditsPath(file.path);
       if (sourcePath) {
@@ -4254,6 +4963,11 @@ Malformed or blank input example:
   }
 
   private onVaultRename(file: TFile, oldPath: string): void {
+    if (this.isAgentPromptPath(oldPath) || this.isAgentPromptPath(file.path)) {
+      void this.reloadAgentPrompts("rename");
+      return;
+    }
+
     if (this.isEditsJsonPath(file.path)) {
       const sourcePath = this.findSourcePathByEditsPath(oldPath);
       if (sourcePath) {
@@ -4936,6 +5650,37 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         color: var(--text-muted);
       }
 
+      .writersroom-agent-picker-list {
+        margin-top: 0.6rem;
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+
+      .writersroom-agent-id {
+        margin-left: 0.4rem;
+        font-size: 0.8em;
+        opacity: 0.7;
+      }
+
+      .writersroom-agent-picker-toolbar {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 1rem;
+        gap: 0.75rem;
+      }
+
+      .writersroom-agent-picker-bulk,
+      .writersroom-agent-picker-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+      }
+
+      .writersroom-agent-picker-toolbar button {
+        cursor: pointer;
+      }
+
       .writersroom-quickprompt-suggestion {
         display: flex;
         flex-direction: column;
@@ -5027,6 +5772,148 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         display: contents;
       }
     `;
+}
+
+class WritersRoomAgentPickerModal extends Modal {
+  private agents: AgentPromptDefinition[];
+  private selected: Set<string>;
+  private onComplete: (selection: string[] | null) => void;
+  private submitted = false;
+  private checkboxes = new Map<string, HTMLInputElement>();
+  private submitButton: HTMLButtonElement | null = null;
+
+  constructor(
+    app: App,
+    agents: AgentPromptDefinition[],
+    initialSelection: string[],
+    onComplete: (selection: string[] | null) => void
+  ) {
+    super(app);
+    this.agents = agents;
+    this.selected = new Set(initialSelection);
+    this.onComplete = onComplete;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("writersroom-agent-picker");
+
+    contentEl.createEl("h2", { text: "Choose Writers Room agents" });
+    contentEl.createEl("p", {
+      text: "Select the specialists you want to run for this pass."
+    });
+
+    const list = contentEl.createDiv({ cls: "writersroom-agent-picker-list" });
+
+    for (const agent of this.agents) {
+      const item = list.createDiv({ cls: "setting-item" });
+      const info = item.createDiv({ cls: "setting-item-info" });
+      const name = info.createDiv({ cls: "setting-item-name" });
+      name.createSpan({ text: agent.label });
+      name.createEl("code", { text: agent.id, cls: "writersroom-agent-id" });
+      info.createDiv({
+        cls: "setting-item-description",
+        text: agent.description
+      });
+
+      const control = item.createDiv({ cls: "setting-item-control" });
+      const checkbox = control.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+      checkbox.setAttribute("aria-label", `Toggle ${agent.label}`);
+      checkbox.checked = this.selected.has(agent.id);
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) {
+          this.selected.add(agent.id);
+        } else {
+          this.selected.delete(agent.id);
+        }
+        this.updateSubmitState();
+      });
+      this.checkboxes.set(agent.id, checkbox);
+
+      item.addEventListener("click", (event) => {
+        if (event.target instanceof HTMLInputElement) {
+          return;
+        }
+        checkbox.checked = !checkbox.checked;
+        if (checkbox.checked) {
+          this.selected.add(agent.id);
+        } else {
+          this.selected.delete(agent.id);
+        }
+        this.updateSubmitState();
+      });
+    }
+
+    const toolbar = contentEl.createDiv({ cls: "writersroom-agent-picker-toolbar" });
+    const bulkActions = toolbar.createDiv({ cls: "writersroom-agent-picker-bulk" });
+    const selectAllBtn = bulkActions.createEl("button", { text: "Select all" });
+    selectAllBtn.addEventListener("click", () => {
+      for (const agent of this.agents) {
+        this.selected.add(agent.id);
+        const checkbox = this.checkboxes.get(agent.id);
+        if (checkbox) {
+          checkbox.checked = true;
+        }
+      }
+      this.updateSubmitState();
+    });
+    const clearBtn = bulkActions.createEl("button", { text: "Clear" });
+    clearBtn.addEventListener("click", () => {
+      this.selected.clear();
+      for (const checkbox of this.checkboxes.values()) {
+        checkbox.checked = false;
+      }
+      this.updateSubmitState();
+    });
+
+    const actionGroup = toolbar.createDiv({ cls: "writersroom-agent-picker-actions" });
+    const cancelBtn = actionGroup.createEl("button", { text: "Cancel" });
+    cancelBtn.addEventListener("click", () => {
+      this.submitted = false;
+      this.close();
+    });
+    this.submitButton = actionGroup.createEl("button", {
+      text: "Run crew",
+      cls: "mod-cta"
+    });
+    this.submitButton.addEventListener("click", () => this.submit());
+
+    this.updateSubmitState();
+
+    this.scope.register([], "Enter", () => {
+      if (this.submitButton && !this.submitButton.disabled) {
+        this.submit();
+      }
+      return false;
+    });
+    this.scope.register([], "Escape", () => {
+      this.close();
+      return false;
+    });
+  }
+
+  onClose(): void {
+    if (!this.submitted) {
+      this.onComplete(null);
+    }
+    this.contentEl.empty();
+  }
+
+  private submit(): void {
+    if (this.selected.size === 0) {
+      return;
+    }
+    this.submitted = true;
+    this.close();
+    this.onComplete(Array.from(this.selected));
+  }
+
+  private updateSubmitState(): void {
+    if (this.submitButton) {
+      this.submitButton.disabled = this.selected.size === 0;
+    }
+  }
 }
 
 class WritersRoomQuickPromptModal extends SuggestModal<QuickPromptDefinition> {
@@ -5823,6 +6710,100 @@ class WritersRoomSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
     });
     (audibleFeedbackSetting as any).controlEl.appendChild(audibleToggle);
+
+    let pendingAgentFolder = this.plugin.settings.agentPromptFolder;
+    const applyAgentFolderChange = async () => {
+      const before = this.plugin.settings.agentPromptFolder;
+      try {
+        await this.plugin.updateAgentPromptFolder(pendingAgentFolder);
+      } catch (error) {
+        console.error("[WritersRoom] Failed to update agent prompt folder.", error);
+        new Notice("Failed to update agent prompt folder. See console for details.");
+        return;
+      }
+      const after = this.plugin.settings.agentPromptFolder;
+      if (after !== before) {
+        new Notice(`Agent prompt folder set to "${after}".`);
+        this.display();
+      }
+    };
+
+    const agentFolderSetting = new Setting(containerEl)
+      .setName("Agent prompt folder")
+      .setDesc("Vault-relative folder where Writers Room agent prompt files are stored.");
+
+    agentFolderSetting.addText((text) => {
+      text
+        .setPlaceholder(DEFAULT_AGENT_PROMPT_FOLDER)
+        .setValue(this.plugin.settings.agentPromptFolder)
+        .onChange((value: string) => {
+          pendingAgentFolder = value;
+        });
+      text.inputEl.addEventListener("blur", () => {
+        void applyAgentFolderChange();
+      });
+    });
+
+    agentFolderSetting.addExtraButton((button) => {
+      button.setIcon("check");
+      button.setTooltip("Apply folder");
+      button.onClick(() => {
+        void applyAgentFolderChange();
+      });
+    });
+
+    const buildDefaultAgentDescription = (): string => {
+      const agents = this.plugin.getAgentPromptDefinitions();
+      if (agents.length === 0) {
+        return "Add agent prompt files to configure the crew lineup.";
+      }
+      const selected = new Set(this.plugin.settings.defaultAgentIds);
+      const labels = agents
+        .filter((agent) => selected.has(agent.id))
+        .map((agent) => agent.label);
+      return labels.length > 0
+        ? `Current lineup: ${labels.join(", ")}.`
+        : "No default agents selected.";
+    };
+
+    const defaultAgentsSetting = new Setting(containerEl)
+      .setName("Default agent lineup")
+      .setDesc(`Agents selected by default when asking the Writers. ${buildDefaultAgentDescription()}`);
+
+    defaultAgentsSetting.addButton((button) => {
+      button.setButtonText("Choose agents");
+      button.onClick(() => {
+        const available = this.plugin.getAgentPromptDefinitions();
+        if (available.length === 0) {
+          new Notice("No agent prompts available. Add prompt files in the configured folder.");
+          return;
+        }
+        const modal = new WritersRoomAgentPickerModal(
+          this.app,
+          available,
+          this.plugin.settings.defaultAgentIds,
+          async (selection) => {
+            if (!selection || selection.length === 0) {
+              return;
+            }
+            await this.plugin.setDefaultAgentIds(selection);
+            new Notice("Default agent lineup updated.");
+            this.display();
+          }
+        );
+        modal.open();
+      });
+    });
+
+    defaultAgentsSetting.addExtraButton((button) => {
+      button.setIcon("rotate-ccw");
+      button.setTooltip("Reset to default crew");
+      button.onClick(async () => {
+        await this.plugin.setDefaultAgentIds(Array.from(DEFAULT_AGENT_IDS));
+        new Notice("Default agent lineup reset.");
+        this.display();
+      });
+    });
 
     new Setting(containerEl)
       .setName("Load demo data")

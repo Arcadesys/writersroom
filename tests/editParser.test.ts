@@ -3,6 +3,7 @@ import { join } from "path";
 import { describe, expect, it } from "vitest";
 
 import {
+  mergeEditPayloads,
   parseEditPayload,
   parseEditPayloadFromString,
   ValidationError
@@ -108,6 +109,26 @@ describe("parseEditPayload", () => {
     const result = parseEditPayload(payload);
     expect(result.edits[0].type).toBe("star");
     expect(result.edits[0].output).toContain("STAR");
+  });
+
+  it("supports custom agent identifiers", () => {
+    const payload = {
+      summary: "ok",
+      edits: [
+        {
+          agent: "flow",
+          line: 2,
+          type: "addition",
+          category: "flow",
+          original_text: "Original line",
+          output: "Revised line"
+        }
+      ]
+    };
+
+    const result = parseEditPayload(payload);
+    expect(result.edits[0].agent).toBe("flow");
+    expect(result.edits[0].category).toBe("flow");
   });
 
   it("rejects payloads with invalid output value", () => {
@@ -398,5 +419,80 @@ describe("parseEditPayloadFromString", () => {
   it("throws validation error on malformed JSON", () => {
     expect(() => parseEditPayloadFromString("{ not json"))
       .toThrowError(/Invalid JSON provided/);
+  });
+});
+
+describe("mergeEditPayloads", () => {
+  it("appends new edits while keeping existing ones", () => {
+    const existing = parseEditPayload({
+      summary: "Existing overview",
+      edits: [
+        {
+          agent: "flow",
+          line: 1,
+          type: "replacement",
+          category: "flow",
+          original_text: "Old line.",
+          output: "Improved line."
+        }
+      ]
+    });
+
+    const incoming = parseEditPayload({
+      summary: "Fresh summary",
+      edits: [
+        {
+          agent: "lens",
+          line: 2,
+          type: "addition",
+          category: "lens",
+          original_text: "Scene beats",
+          output: "Add a splash of rain on the windowsill."
+        }
+      ]
+    });
+
+    const merged = mergeEditPayloads(existing, incoming);
+
+    expect(merged.summary).toBe("Fresh summary");
+    expect(merged.edits).toHaveLength(2);
+    expect(new Set(merged.edits.map((edit) => edit.anchor)).size).toBe(2);
+    expect(merged.edits[0].agent).toBe("flow");
+    expect(merged.edits[1].agent).toBe("lens");
+  });
+
+  it("deduplicates identical edits from new payload", () => {
+    const existing = parseEditPayload({
+      summary: "Existing",
+      edits: [
+        {
+          agent: "punch",
+          line: 3,
+          type: "addition",
+          category: "punch",
+          original_text: "Cliffhanger",
+          output: "Let thunder roll through the doorway."
+        }
+      ]
+    });
+
+    const duplicate = parseEditPayload({
+      summary: "Duplicate run",
+      edits: [
+        {
+          agent: "punch",
+          line: 3,
+          type: "addition",
+          category: "punch",
+          original_text: "Cliffhanger",
+          output: "Let thunder roll through the doorway."
+        }
+      ]
+    });
+
+    const merged = mergeEditPayloads(existing, duplicate);
+
+    expect(merged.edits).toHaveLength(1);
+    expect(merged.summary).toBe("Duplicate run");
   });
 });

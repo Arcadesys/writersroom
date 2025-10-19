@@ -26,6 +26,49 @@ export class App {
   };
 }
 
+const createElementStub = () => ({
+  addClass: () => {},
+  removeClass: () => {},
+  empty: () => {},
+  createEl: () => createElementStub(),
+  createDiv: () => createElementStub(),
+  createSpan: () => createElementStub(),
+  setAttr: () => {},
+  setAttribute: () => {},
+  appendChild: () => {},
+  setText: () => {},
+  setButtonText: () => {},
+  setCta: () => {},
+  onClick: () => {},
+  textContent: ""
+});
+
+export class Modal {
+  app: App;
+  scope = { register: () => {} };
+  contentEl = createElementStub();
+
+  constructor(app: App) {
+    this.app = app;
+  }
+
+  open(): void {}
+  close(): void {}
+}
+
+export class SuggestModal<T> extends Modal {
+  constructor(app: App) {
+    super(app);
+  }
+  setPlaceholder(): void {}
+  setInstructions(): void {}
+  getSuggestions(_query: string): T[] {
+    return [];
+  }
+  renderSuggestion(_value: T, _el: any): void {}
+  onChooseItem(_value: T): void {}
+}
+
 export class ItemView {
   containerEl: any = {
     addClass: () => {},
@@ -113,16 +156,35 @@ export class Setting {
   setDesc() {
     return this;
   }
-  addText() {
+  addText(callback?: (text: TextComponent) => void) {
+    callback?.(new TextComponent());
     return this;
   }
-  addButton() {
+  addButton(callback?: (button: any) => void) {
+    const button = {
+      setButtonText: () => {},
+      setCta: () => {},
+      onClick: () => {}
+    };
+    callback?.(button);
+    return this;
+  }
+  addExtraButton(callback?: (button: any) => void) {
+    const button = {
+      setIcon: () => {},
+      setTooltip: () => {},
+      onClick: () => {}
+    };
+    callback?.(button);
     return this;
   }
 }
 
 export class TextComponent {
-  inputEl = { type: "" };
+  inputEl = {
+    type: "",
+    addEventListener: () => {}
+  };
   setPlaceholder() {
     return this;
   }
