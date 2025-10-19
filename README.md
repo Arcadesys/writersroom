@@ -4,10 +4,11 @@ An Obsidian plugin that integrates ChatGPT prompts directly into your notes, all
 
 ## Features
 
-- 📝 Call ChatGPT prompts using custom prompt IDs
+- 🧩 Compose edit runs from individual “agents” (Flow, Lens, Punch) or your own prompt files
+- 📝 Call ChatGPT prompts using custom prompt IDs directly from Obsidian
 - ✨ Highlight and visualize AI-suggested edits in your markdown
 - 🎨 Color-coded edit annotations (additions, deletions, replacements)
-- 🔄 Streaming responses with real-time updates
+- 🔄 Streaming responses with real-time updates and progress logs
 
 ## Installation via BRAT
 
@@ -43,15 +44,56 @@ After enabling the plugin, configure your settings:
 
 1. Go to **Settings** → **Writers Room**
 2. Add your OpenAI API key
-3. Configure your prompt settings and preferences
+3. Configure your prompt settings and preferences:
+   - Choose the vault folder that stores agent prompt files (defaults to `WritersRoom Agents`)
+   - Pick the default agent lineup that runs when you ask the Writers
+   - Adjust highlight colours and audible feedback to taste
+
+## Agent prompts
+
+When the plugin loads it creates a folder called `WritersRoom Agents` (or the folder you specify). Each markdown file inside that folder becomes a specialist agent you can call during an edit pass.
+
+The built-in crew includes:
+
+- `flow.md` — smooth sentence-level clarity and cadence
+- `lens.md` — deepen POV, interiority, and sensory texture
+- `punch.md` — heighten emotional impact without tipping into melodrama
+
+Each prompt file supports simple frontmatter:
+
+```yaml
+---
+id: flow
+label: Flow
+description: Smooth sentence-level clarity, cadence, and transitions.
+order: 1
+---
+You are the Flow editor...
+```
+
+Only the body text is required; `id`, `label`, `description`, and `order` help with menus and ordering. Add new files or edit the defaults to tune the crew to your style.
 
 ## Usage
 
-*(Coming soon - plugin is currently in development)*
+### Ask the Writers for a full pass
 
-- Use prompt IDs to call specific ChatGPT prompts
-- View highlighted edits in your markdown files
-- Accept or reject suggested changes
+1. Open the note you want to revise.
+2. Run **Command Palette → Writers Room: Ask the Writers for edits**.
+3. Choose the agents you want for this pass (Flow/Lens/Punch or your custom prompts).
+4. Wait for the streaming response. Progress updates and the model’s reasoning appear in the sidebar.
+5. Review the highlighted edits, accept or reject them, and iterate as needed.
+
+### Quick prompts on a selection
+
+- Select text in any note and run **Command Palette → Writers Room: Run quick prompt on selection**.
+- Choose from specialist quick prompts (Flow/Lens/Punch), the full crew, or other utilities like “Punch up this line”.
+- Results appear in a modal with copy-to-clipboard helpers.
+
+### Customising the crew
+
+- Edit the markdown prompt files in your agent folder to tweak instructions.
+- Add new `.md` files to introduce additional agents—each file is an independent specialist.
+- Use the Writers Room settings tab to set the default lineup that appears preselected in the agent picker.
 
 ## Development
 
