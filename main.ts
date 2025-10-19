@@ -3085,6 +3085,14 @@ export default class WritersRoomPlugin extends Plugin {
 
     view.updateSelection(anchorId);
 
+    // Refresh editor highlights to ensure anchor elements exist before scrolling
+    this.refreshEditorHighlights();
+
+    // Small delay to allow DOM to update after refresh
+    if (typeof window !== "undefined" && origin === "sidebar") {
+      await new Promise(resolve => window.setTimeout(resolve, 50));
+    }
+
     const shouldScroll = origin !== "highlight";
     this.setActiveHighlight(anchorId, {
       scroll: shouldScroll,
@@ -3261,6 +3269,7 @@ export default class WritersRoomPlugin extends Plugin {
       ? datasetIndex
       : effectiveIndex;
 
+    // Always try to scroll if we have a target or valid line info
     this.scrollEditorsToAnchor(
       primaryTarget ?? null,
       anchorId,
@@ -3271,6 +3280,8 @@ export default class WritersRoomPlugin extends Plugin {
 
     if (!primaryTarget) {
       if (attempt < maxAttempts && typeof window !== "undefined") {
+        // Use longer delay on first attempt to allow editor decorations to render
+        const retryDelay = attempt === 0 ? 300 : 180;
         this.highlightRetryHandle = window.setTimeout(() => {
           this.highlightRetryHandle = null;
           this.setActiveHighlight(anchorId, {
@@ -3279,7 +3290,7 @@ export default class WritersRoomPlugin extends Plugin {
             editIndex: effectiveIndex,
             origin: options?.origin
           });
-        }, 180);
+        }, retryDelay);
       }
       return;
     }
@@ -6373,6 +6384,12 @@ class WritersRoomSidebarView extends ItemView {
             formattedStar.addClass("writersroom-sidebar-item-snippet");
             formattedStar.addClass("writersroom-sidebar-star-text");
             contentEl.appendChild(formattedStar);
+          } else {
+            // Show placeholder for stars without comment text
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
+              text: "⭐ (Exemplary passage - no additional comment)"
+            });
           }
         } else {
           // For additions, replacements, and subtractions, show original snippet
