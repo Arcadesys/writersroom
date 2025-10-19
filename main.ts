@@ -201,7 +201,6 @@ import {
   EditPayload,
   ValidationError,
   createEditAnchorId,
-  mergeEditPayloads,
   parseEditPayload,
   parseEditPayloadFromString
 } from "./editParser";
@@ -387,7 +386,7 @@ type ColorScheme = "default" | "high-contrast" | "colorblind-friendly" | "muted"
 
 const DEFAULT_AGENT_PROMPT_FOLDER = "WritersRoom Agents";
 const DEFAULT_AGENT_IDS = ["flow", "lens", "punch"] as const;
-const MAX_NOTE_WORD_LIMIT = 4000;
+const LARGE_FILE_WARNING_THRESHOLD_WORDS = 4000;
 
 interface AgentPromptDefinition {
   id: string;
@@ -1465,42 +1464,6 @@ export default class WritersRoomPlugin extends Plugin {
     });
   }
 
-  getAgentPromptDefinitions(): AgentPromptDefinition[] {
-    return this.agentPrompts.map((agent) => ({ ...agent }));
-  }
-
-  async updateAgentPromptFolder(folder: string): Promise<void> {
-    const normalized = this.normalizeAgentPromptFolder(folder);
-    if (normalized === this.settings.agentPromptFolder) {
-      return;
-    }
-
-    this.settings.agentPromptFolder = normalized;
-    await this.saveSettings();
-    await this.loadAgentPrompts();
-  }
-
-  async setDefaultAgentIds(agentIds: string[]): Promise<void> {
-    const normalized = this.resolveAgentIds(agentIds);
-    if (normalized.length === 0) {
-      this.logWarn("Attempted to set default agent list, but no valid agents were provided.");
-      return;
-    }
-
-    const current = this.settings.defaultAgentIds;
-    const identical =
-      current.length === normalized.length &&
-      current.every((value, index) => value === normalized[index]);
-    if (identical) {
-      return;
-    }
-
-    this.settings.defaultAgentIds = [...normalized];
-    this.lastAgentSelection = [...normalized];
-    await this.saveSettings();
-    this.rebuildQuickPromptsFromAgents();
-  }
-
   private normalizePersistedEntry(
     sourcePath: string,
     record: StoredEditRecord
@@ -1733,8 +1696,8 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerWorkspaceListeners();
     this.registerEditorMenu();
 
-    // Add ribbon icon to sidebar
-    this.addRibbonIcon("book-open", "Open Writers Room", async () => {
+    // Add ribbon icon to left sidebar for quick access
+    this.addRibbonIcon("pen-tool", "Open Writers Room", async () => {
       await this.openSidebarForActiveFile();
     });
 
@@ -3700,9 +3663,15 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     const wordCount = trimmed.split(/\s+/).length;
-    if (wordCount > MAX_NOTE_WORD_LIMIT) {
-      new Notice(`Selection is too long (${wordCount} words). Limit to ${MAX_NOTE_WORD_LIMIT} words or fewer.`);
-      return;
+    if (wordCount > LARGE_FILE_WARNING_THRESHOLD_WORDS) {
+      const proceed = await this.confirmLargeFileOperation(
+        wordCount,
+        `Your selection is quite long (${wordCount} words). Processing may take several minutes and could be slow. Continue?`
+      );
+      if (!proceed) {
+        new Notice("Quick prompt cancelled.");
+        return;
+      }
     }
 
     const prompt = await this.pickQuickPromptDefinition();
@@ -3777,7 +3746,6 @@ export default class WritersRoomPlugin extends Plugin {
     const promptAgentIds = prompt.agentIds ? this.resolveAgentIds(prompt.agentIds) : [];
     if (promptAgentIds.length > 0) {
       this.activeRunAgentIds = [...promptAgentIds];
-      this.lastAgentSelection = [...promptAgentIds];
     } else {
       this.activeRunAgentIds = null;
     }
@@ -4148,24 +4116,24 @@ Malformed or blank input example:
     });
   }
 
-  private async confirmAppendExistingEdits(
-    sourcePath: string,
-    existingPayload: EditPayload | null
+  private async clearOutstandingEditsBeforeRequest(
+    sourcePath: string
   ): Promise<boolean> {
-    if (!existingPayload || existingPayload.edits.length === 0) {
+    const payload = await this.getEditPayloadForSource(sourcePath);
+    if (!payload || payload.edits.length === 0) {
       return true;
     }
 
-    const promptMessage =
-      "Existing Writers Room edits will be kept and new suggestions will be added to them. Continue?";
+    const warningMessage =
+      "Requesting new Writers Room edits will delete the existing suggestions for this note. Continue?";
 
     let proceed = true;
     if (typeof window !== "undefined" && typeof window.confirm === "function") {
-      proceed = window.confirm(promptMessage);
+      proceed = window.confirm(warningMessage);
     } else {
-      this.logWarn("Confirmation prompt unavailable; appending edits automatically.", {
+      this.logWarn("Confirmation prompt unavailable; clearing outstanding edits automatically.", {
         sourcePath,
-        existingEdits: existingPayload.edits.length
+        existingEdits: payload.edits.length
       });
     }
 
@@ -4174,7 +4142,29 @@ Malformed or blank input example:
       return false;
     }
 
+    const persisted = this.persistedEdits.get(sourcePath);
+    const editsPath = persisted?.editsPath ?? this.getEditsPathForSource(sourcePath);
+
+    this.removePersistedEdit(sourcePath, { cacheValue: null });
+
+    if (editsPath) {
+      await this.deleteFileIfExists(editsPath);
+    }
+
+    void this.refreshSidebarForActiveFile();
+    new Notice("Previous Writers Room edits deleted.");
     return true;
+  }
+
+  private async confirmLargeFileOperation(wordCount: number, message: string): Promise<boolean> {
+    if (typeof window !== "undefined" && typeof window.confirm === "function") {
+      return window.confirm(message);
+    } else {
+      this.logWarn("Confirmation prompt unavailable; proceeding with large file operation.", {
+        wordCount
+      });
+      return true;
+    }
   }
 
   private async requestAiEditsForFile(
@@ -4214,9 +4204,15 @@ Malformed or blank input example:
 
     // Check word count limit
     const wordCount = noteContents.trim().split(/\s+/).length;
-    if (wordCount > MAX_NOTE_WORD_LIMIT) {
-      new Notice(`Your note is too long (${wordCount} words). Please limit to ${MAX_NOTE_WORD_LIMIT} words or less.`);
-      return;
+    if (wordCount > LARGE_FILE_WARNING_THRESHOLD_WORDS) {
+      const proceed = await this.confirmLargeFileOperation(
+        wordCount,
+        `This note is quite long (${wordCount} words). Processing may take several minutes and could be slow. Continue?`
+      );
+      if (!proceed) {
+        new Notice("Cancelled asking the Writers.");
+        return;
+      }
     }
 
     if (this.agentPrompts.length === 0) {
@@ -4246,22 +4242,21 @@ Malformed or blank input example:
     this.lastAgentSelection = [...activeAgentIds];
     const agentNames = agentDefinitions.map((agent) => agent.label).join(", ");
 
-    const existingPayload = await this.getEditPayloadForSource(file.path);
-    const proceed = await this.confirmAppendExistingEdits(file.path, existingPayload);
-    if (!proceed) {
-      return;
-    }
-
     this.activeSourcePath = file.path;
     this.activeAnchorId = null;
     this.activeEditIndex = null;
-    this.activePayload = existingPayload ?? null;
+    this.activePayload = null;
+
+    const cleared = await this.clearOutstandingEditsBeforeRequest(file.path);
+    if (!cleared) {
+      return;
+    }
 
     this.resetRequestProgress();
 
     await this.ensureSidebar({
       sourcePath: file.path,
-      payload: existingPayload ?? null,
+      payload: null,
       selectedAnchorId: null
     });
 
@@ -4275,8 +4270,6 @@ Malformed or blank input example:
 
     // Play request start audicon for accessibility
     this.audiconPlayer?.play("request-start");
-
-    const previousEditCount = existingPayload?.edits.length ?? 0;
 
     try {
       const systemPrompt = this.buildSystemPromptForAgents(activeAgentIds);
@@ -4426,30 +4419,27 @@ Malformed or blank input example:
         throw new Error("OpenAI response did not include a JSON payload.");
       }
 
-      this.advanceRequestProgress("Finalizing your edits…");
+    this.advanceRequestProgress("Finalizing your edits…");
 
-      const newPayload = this.parseAiPayload(jsonText);
-      const mergedPayload = mergeEditPayloads(existingPayload ?? null, newPayload);
-      const totalEditsCount = mergedPayload.edits.length;
-      const newEditsCount = totalEditsCount - previousEditCount;
+    const payload = this.parseAiPayload(jsonText);
 
       await this.ensureFolder("edits");
-      await this.writeFile(editsPath, JSON.stringify(mergedPayload, null, 2) + "\n");
+      await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
 
-      await this.persistEditsForSource(file.path, mergedPayload, { editsPath });
+      await this.persistEditsForSource(file.path, payload, { editsPath });
       this.editCachePromises.delete(file.path);
       this.activeSourcePath = file.path;
-      this.activePayload = mergedPayload;
+      this.activePayload = payload;
 
       this.logInfo("Writers Room edits generated.", {
         file: file.path,
-        newEdits: newEditsCount,
-        totalEdits: totalEditsCount
+        edits: payload.edits.length
       });
 
+      const editsCount = payload.edits.length;
       const progressCompletionMessage =
-        newEditsCount > 0
-          ? `Writers added ${newEditsCount} new edit${newEditsCount === 1 ? "" : "s"} (${totalEditsCount} total).`
+        editsCount > 0
+          ? `Writers delivered ${editsCount} edit${editsCount === 1 ? "" : "s"}.`
           : "Writers responded without new edits.";
 
       this.completeRequestProgress(progressCompletionMessage);
@@ -4457,16 +4447,10 @@ Malformed or blank input example:
       // Play request complete audicon for accessibility
       this.audiconPlayer?.play("request-complete");
 
-      if (totalEditsCount > 0) {
-        const firstIndex = newEditsCount > 0 ? previousEditCount : 0;
-        const firstAnchor = this.getAnchorForEdit(mergedPayload.edits[firstIndex], firstIndex);
+      if (editsCount > 0) {
+        const firstAnchor = this.getAnchorForEdit(payload.edits[0], 0);
         await this.selectEdit(file.path, firstAnchor, origin);
-        const noticeCount = newEditsCount > 0 ? newEditsCount : totalEditsCount;
-        const noticeLabel =
-          newEditsCount > 0
-            ? `Writers added ${noticeCount} new edit${noticeCount === 1 ? "" : "s"}.`
-            : `No new edits; ${totalEditsCount} suggestion${totalEditsCount === 1 ? "" : "s"} available.`;
-        new Notice(noticeLabel);
+        new Notice(`Writers provided ${editsCount} edit${editsCount === 1 ? "" : "s"}.`);
       } else {
         await this.refreshSidebarForActiveFile();
         new Notice("Writers responded without specific edits.");
@@ -5650,37 +5634,6 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         color: var(--text-muted);
       }
 
-      .writersroom-agent-picker-list {
-        margin-top: 0.6rem;
-        display: flex;
-        flex-direction: column;
-        gap: 0.4rem;
-      }
-
-      .writersroom-agent-id {
-        margin-left: 0.4rem;
-        font-size: 0.8em;
-        opacity: 0.7;
-      }
-
-      .writersroom-agent-picker-toolbar {
-        display: flex;
-        justify-content: space-between;
-        margin-top: 1rem;
-        gap: 0.75rem;
-      }
-
-      .writersroom-agent-picker-bulk,
-      .writersroom-agent-picker-actions {
-        display: flex;
-        align-items: center;
-        gap: 0.5rem;
-      }
-
-      .writersroom-agent-picker-toolbar button {
-        cursor: pointer;
-      }
-
       .writersroom-quickprompt-suggestion {
         display: flex;
         flex-direction: column;
@@ -5774,7 +5727,26 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
     `;
 }
 
-class WritersRoomAgentPickerModal extends Modal {
+const ModalCtor: typeof Modal =
+  typeof Modal === "function"
+    ? Modal
+    : (class ModalFallback {
+        app: App;
+        scope = { register: () => {} };
+        contentEl: HTMLElement;
+
+        constructor(app: App) {
+          this.app = app;
+          const doc = typeof document !== "undefined" ? document : null;
+          this.contentEl = doc?.createElement("div") ?? ({} as HTMLElement);
+        }
+
+        open(): void {}
+        close(): void {}
+      } as unknown as typeof Modal);
+
+class WritersRoomAgentPickerModal extends ModalCtor {
+  declare scope: { register: (modifiers: string[], key: string, handler: () => boolean | void) => void };
   private agents: AgentPromptDefinition[];
   private selected: Set<string>;
   private onComplete: (selection: string[] | null) => void;
@@ -6710,100 +6682,6 @@ class WritersRoomSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
     });
     (audibleFeedbackSetting as any).controlEl.appendChild(audibleToggle);
-
-    let pendingAgentFolder = this.plugin.settings.agentPromptFolder;
-    const applyAgentFolderChange = async () => {
-      const before = this.plugin.settings.agentPromptFolder;
-      try {
-        await this.plugin.updateAgentPromptFolder(pendingAgentFolder);
-      } catch (error) {
-        console.error("[WritersRoom] Failed to update agent prompt folder.", error);
-        new Notice("Failed to update agent prompt folder. See console for details.");
-        return;
-      }
-      const after = this.plugin.settings.agentPromptFolder;
-      if (after !== before) {
-        new Notice(`Agent prompt folder set to "${after}".`);
-        this.display();
-      }
-    };
-
-    const agentFolderSetting = new Setting(containerEl)
-      .setName("Agent prompt folder")
-      .setDesc("Vault-relative folder where Writers Room agent prompt files are stored.");
-
-    agentFolderSetting.addText((text) => {
-      text
-        .setPlaceholder(DEFAULT_AGENT_PROMPT_FOLDER)
-        .setValue(this.plugin.settings.agentPromptFolder)
-        .onChange((value: string) => {
-          pendingAgentFolder = value;
-        });
-      text.inputEl.addEventListener("blur", () => {
-        void applyAgentFolderChange();
-      });
-    });
-
-    agentFolderSetting.addExtraButton((button) => {
-      button.setIcon("check");
-      button.setTooltip("Apply folder");
-      button.onClick(() => {
-        void applyAgentFolderChange();
-      });
-    });
-
-    const buildDefaultAgentDescription = (): string => {
-      const agents = this.plugin.getAgentPromptDefinitions();
-      if (agents.length === 0) {
-        return "Add agent prompt files to configure the crew lineup.";
-      }
-      const selected = new Set(this.plugin.settings.defaultAgentIds);
-      const labels = agents
-        .filter((agent) => selected.has(agent.id))
-        .map((agent) => agent.label);
-      return labels.length > 0
-        ? `Current lineup: ${labels.join(", ")}.`
-        : "No default agents selected.";
-    };
-
-    const defaultAgentsSetting = new Setting(containerEl)
-      .setName("Default agent lineup")
-      .setDesc(`Agents selected by default when asking the Writers. ${buildDefaultAgentDescription()}`);
-
-    defaultAgentsSetting.addButton((button) => {
-      button.setButtonText("Choose agents");
-      button.onClick(() => {
-        const available = this.plugin.getAgentPromptDefinitions();
-        if (available.length === 0) {
-          new Notice("No agent prompts available. Add prompt files in the configured folder.");
-          return;
-        }
-        const modal = new WritersRoomAgentPickerModal(
-          this.app,
-          available,
-          this.plugin.settings.defaultAgentIds,
-          async (selection) => {
-            if (!selection || selection.length === 0) {
-              return;
-            }
-            await this.plugin.setDefaultAgentIds(selection);
-            new Notice("Default agent lineup updated.");
-            this.display();
-          }
-        );
-        modal.open();
-      });
-    });
-
-    defaultAgentsSetting.addExtraButton((button) => {
-      button.setIcon("rotate-ccw");
-      button.setTooltip("Reset to default crew");
-      button.onClick(async () => {
-        await this.plugin.setDefaultAgentIds(Array.from(DEFAULT_AGENT_IDS));
-        new Notice("Default agent lineup reset.");
-        this.display();
-      });
-    });
 
     new Setting(containerEl)
       .setName("Load demo data")
