@@ -6,6 +6,7 @@ declare module "obsidian" {
 
   export interface Workspace {
     on(event: "file-open", callback: (file: TFile | null) => void): EventRef;
+    on(event: "editor-menu", callback: (menu: Menu, editor: Editor, view: MarkdownView) => void): EventRef;
     on(event: string, callback: (...args: any[]) => void): EventRef;
     getActiveFile(): TFile | null;
     openLinkText?(path: string, sourcePath: string, newLeaf?: boolean): Promise<void>;
@@ -43,6 +44,7 @@ declare module "obsidian" {
     scrollIntoView(range: { from: EditorPosition; to: EditorPosition }, center?: boolean): void;
     getLine(line: number): string;
     getValue(): string;
+    getSelection(): string;
     replaceRange(text: string, from: EditorPosition, to?: EditorPosition): void;
     posToOffset?(pos: EditorPosition): number;
     offsetToPos(offset: number): EditorPosition;
@@ -64,6 +66,16 @@ declare module "obsidian" {
   }
 
   export interface EventRef {}
+
+  export class Menu {
+    addItem(callback: (item: MenuItem) => void): MenuItem;
+  }
+
+  export class MenuItem {
+    setTitle(title: string): this;
+    setIcon(icon: string): this;
+    onClick(callback: () => void): this;
+  }
 
   interface SettingContainerEl extends HTMLElement {
     empty(): void;
@@ -122,6 +134,50 @@ declare module "obsidian" {
   export class Notice {
     constructor(message: string, timeout?: number);
     hide(): void;
+  }
+
+  export class Component {
+    addChild?(component: Component): void;
+    removeChild?(component: Component): void;
+    registerEvent?(ref: EventRef): void;
+    registerDomEvent?(
+      el: HTMLElement,
+      type: string,
+      callback: (event: Event) => void
+    ): EventRef;
+    registerInterval?(id: number): number;
+    onload?(): void;
+    onunload?(): void;
+  }
+
+  export class Modal extends Component {
+    app: App;
+    contentEl: HTMLElement;
+    constructor(app: App);
+    open(): void;
+    close(): void;
+    onOpen(): void;
+    onClose(): void;
+  }
+
+  export abstract class SuggestModal<T> extends Modal {
+    constructor(app: App);
+    setPlaceholder(placeholder: string): void;
+    setInstructions?(instructions: Array<{ command: string; purpose: string }>): void;
+    open(): void;
+    close(): void;
+    abstract getSuggestions(query: string): T[];
+    abstract renderSuggestion(item: T, el: HTMLElement): void;
+    abstract onChooseItem(item: T, evt?: MouseEvent | KeyboardEvent): void;
+  }
+
+  export class MarkdownRenderer {
+    static renderMarkdown(
+      markdown: string,
+      container: HTMLElement,
+      sourcePath: string,
+      component: Component
+    ): Promise<void>;
   }
 
   export class Plugin {

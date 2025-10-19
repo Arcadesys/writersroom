@@ -4,10 +4,13 @@ import {
   Editor,
   ItemView,
   MarkdownView,
+  Modal,
+  MarkdownRenderer,
   Notice,
   Plugin,
   PluginSettingTab,
   Setting,
+  SuggestModal,
   TextComponent,
   TAbstractFile,
   TFile,
@@ -699,6 +702,33 @@ interface HighlightActivationOptions {
   origin?: SelectionOrigin;
 }
 
+type QuickPromptId = "punch-up-line" | "story-direction" | "ask-writers";
+
+interface QuickPromptDefinition {
+  id: QuickPromptId;
+  label: string;
+  description: string;
+  getSystemPrompt: () => string;
+  buildUserMessage: (selection: string) => string;
+  model?: string;
+  temperature?: number;
+  format?: "markdown" | "json" | "text";
+}
+
+interface QuickPromptRunResult {
+  prompt: QuickPromptDefinition;
+  content: string;
+  format: "markdown" | "json" | "text";
+  sourcePath: string | null;
+  selection: string;
+  model: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
 export default class WritersRoomPlugin extends Plugin {
   settings: WritersRoomSettings = DEFAULT_SETTINGS;
   private persistedEdits = new Map<string, PersistedEditEntry>();
@@ -721,6 +751,39 @@ export default class WritersRoomPlugin extends Plugin {
   private requestProgressMessageIndex = -1;
   private requestProgressActiveLabel: string | null = null;
   audiconPlayer: AudiconPlayer | null = null; // Public for settings access
+  private readonly quickPromptDefinitions: QuickPromptDefinition[] = [
+    {
+      id: "punch-up-line",
+      label: "Punch up this line",
+      description: "Sharpen the selection with punchier alternatives and quick rationale.",
+      getSystemPrompt: () => `You are a nimble fiction line editor. When a writer gives you a short snippet, you propose two or three sharper rephrasings that keep the original intent but heighten rhythm, energy, and sensory detail. Keep voice consistent with the source. Respond in markdown as a numbered list. Each item must include the revised line in bold on the first line and a single-sentence rationale in italics on the next line.`,
+      buildUserMessage: (selection: string) => `Here is the snippet to improve:\n\n"""\n${selection.trim()}\n"""\n\nOffer two or three punchier rewrites following the required format.`,
+      model: "gpt-4.1-mini",
+      temperature: 0.7,
+      format: "markdown"
+    },
+    {
+      id: "story-direction",
+      label: "Give me ideas on where to go",
+      description: "Brainstorm next-scene directions anchored in the selected text.",
+      getSystemPrompt: () => `You are a collaborative story-room producer. Given an excerpt, suggest compelling next steps that the author could explore. Emphasize character motivation, tension, and sensory hooks. Respond in markdown using level-three headings for each idea (e.g., "### Idea 1"), followed by two concise bullet points: one summarizing the direction, one highlighting why it could resonate.`,
+      buildUserMessage: (selection: string) => `Treat the following excerpt as the current state of the draft:\n\n"""\n${selection.trim()}\n"""\n\nPropose three distinct directions that build naturally from this material.`,
+      model: "gpt-4.1-mini",
+      temperature: 0.8,
+      format: "markdown"
+    },
+    {
+      id: "ask-writers",
+      label: "Ask the Writers (selection)",
+      description: "Run the full editorial prompt against just the highlighted text.",
+      getSystemPrompt: () => this.getWritersSystemPrompt(),
+      buildUserMessage: (selection: string) => selection,
+      model: "gpt-5",
+      temperature: 0.2,
+      format: "json"
+    }
+  ];
+  private quickPromptInProgress = false;
 
   private log(
     level: "debug" | "info" | "warn" | "error",
@@ -1084,6 +1147,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.registerHighlighting();
     this.registerVaultListeners();
     this.registerWorkspaceListeners();
+    this.registerEditorMenu();
 
     // Add ribbon icon to sidebar
     this.addRibbonIcon("book-open", "Open Writers Room", async () => {
@@ -1156,6 +1220,21 @@ export default class WritersRoomPlugin extends Plugin {
         }
         if (!checking) {
           void this.requestAiEditsForActiveFile("external");
+        }
+        return true;
+      }
+    });
+
+    this.addCommand({
+      id: "writers-room-run-quick-prompt",
+      name: "Run quick prompt on selection",
+      checkCallback: (checking) => {
+        const info = this.getActiveSelectionInfo();
+        if (!info || info.selection.trim().length === 0) {
+          return false;
+        }
+        if (!checking) {
+          void this.launchQuickPromptFlow(info.selection, info.sourcePath ?? null);
         }
         return true;
       }
@@ -1323,6 +1402,27 @@ export default class WritersRoomPlugin extends Plugin {
         }
         void this.refreshSidebarForActiveFile();
         this.refreshEditorHighlights();
+      })
+    );
+  }
+
+  private registerEditorMenu(): void {
+    this.registerEvent(
+      this.app.workspace.on("editor-menu", (menu, editor, view) => {
+        const selection = editor.getSelection();
+        if (!selection || selection.trim().length === 0) {
+          return;
+        }
+
+        menu.addItem((item) => {
+          item
+            .setTitle("Run quick prompt on selection")
+            .setIcon("zap")
+            .onClick(() => {
+              const sourcePath = view.file?.path ?? null;
+              void this.launchQuickPromptFlow(selection, sourcePath);
+            });
+        });
       })
     );
   }
@@ -2989,6 +3089,183 @@ export default class WritersRoomPlugin extends Plugin {
     return this.isTFile(abstract) ? abstract : null;
   }
 
+  private getActiveSelectionInfo(): { selection: string; sourcePath: string | null } | null {
+    const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view) {
+      return null;
+    }
+
+    const selection = view.editor.getSelection();
+    if (!selection || selection.length === 0) {
+      return null;
+    }
+
+    return {
+      selection,
+      sourcePath: view.file?.path ?? null
+    };
+  }
+
+  private async launchQuickPromptFlow(selection: string, sourcePath: string | null): Promise<void> {
+    const trimmed = selection.trim();
+    if (!trimmed) {
+      new Notice("Select some text before running a quick prompt.");
+      return;
+    }
+
+    const wordCount = trimmed.split(/\s+/).length;
+    if (wordCount > 4000) {
+      new Notice(`Selection is too long (${wordCount} words). Limit to 4000 words or fewer.`);
+      return;
+    }
+
+    const prompt = await this.pickQuickPromptDefinition();
+    if (!prompt) {
+      return;
+    }
+
+    await this.executeQuickPrompt(prompt, trimmed, sourcePath ?? null);
+  }
+
+  private async pickQuickPromptDefinition(defaultId?: QuickPromptId): Promise<QuickPromptDefinition | null> {
+    if (this.quickPromptDefinitions.length === 0) {
+      new Notice("No quick prompts are configured.");
+      return null;
+    }
+
+    if (defaultId) {
+      const match = this.quickPromptDefinitions.find((prompt) => prompt.id === defaultId);
+      if (match) {
+        return match;
+      }
+    }
+
+    return new Promise<QuickPromptDefinition | null>((resolve) => {
+      const modal = new WritersRoomQuickPromptModal(this.app, this.quickPromptDefinitions, (choice) => {
+        resolve(choice ?? null);
+      });
+      modal.open();
+    });
+  }
+
+  private async executeQuickPrompt(
+    prompt: QuickPromptDefinition,
+    selection: string,
+    sourcePath: string | null
+  ): Promise<void> {
+    if (this.quickPromptInProgress) {
+      new Notice("Already running a quick prompt. Please wait.");
+      return;
+    }
+
+    const apiKey = this.getResolvedApiKey();
+    if (!apiKey) {
+      new Notice("Add your OpenAI API key in Writers Room settings first.");
+      return;
+    }
+
+    const userMessage = prompt.buildUserMessage(selection);
+    if (!userMessage || userMessage.trim().length === 0) {
+      new Notice("Could not prepare the quick prompt request.");
+      return;
+    }
+
+    const systemPrompt = prompt.getSystemPrompt();
+    if (!systemPrompt || systemPrompt.trim().length === 0) {
+      new Notice("Quick prompt is missing instructions.");
+      return;
+    }
+
+    const fetchImpl: typeof fetch | null =
+      typeof fetch !== "undefined"
+        ? fetch
+        : typeof window !== "undefined" && typeof window.fetch === "function"
+          ? window.fetch.bind(window)
+          : null;
+
+    if (!fetchImpl) {
+      new Notice("Fetch API is unavailable in this environment.");
+      return;
+    }
+
+    const model = prompt.model ?? "gpt-4.1-mini";
+    const temperature = prompt.temperature ?? 0.6;
+    const loadingNotice = new Notice(`Running "${prompt.label}"…`, 0);
+
+    this.quickPromptInProgress = true;
+
+    try {
+      const body: Record<string, unknown> = {
+        model,
+        temperature,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userMessage }
+        ]
+      };
+
+      if (prompt.format === "json") {
+        body.response_format = { type: "json_object" };
+      }
+
+      const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`
+        },
+        body: JSON.stringify(body)
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 400)}`);
+      }
+
+      const payload = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string | null } }>;
+        usage?: {
+          prompt_tokens?: number;
+          completion_tokens?: number;
+          total_tokens?: number;
+        };
+      };
+
+      const rawContent = payload.choices?.[0]?.message?.content ?? "";
+      if (!rawContent || rawContent.trim().length === 0) {
+        throw new Error("OpenAI response did not include any content.");
+      }
+
+      const result: QuickPromptRunResult = {
+        prompt,
+        content: rawContent.trim(),
+        format: prompt.format ?? "markdown",
+        sourcePath,
+        selection,
+        model,
+        usage: payload.usage
+      };
+
+      await this.presentQuickPromptResult(result);
+    } catch (error) {
+      this.logError("Quick prompt request failed.", error, {
+        prompt: prompt.id,
+        sourcePath
+      });
+
+      const message = error instanceof Error ? error.message : String(error);
+      new Notice(`Quick prompt failed: ${message}`);
+    } finally {
+      loadingNotice.hide();
+      this.quickPromptInProgress = false;
+    }
+  }
+
+  private async presentQuickPromptResult(result: QuickPromptRunResult): Promise<void> {
+    const modal = new WritersRoomQuickResultModal(this.app, this, result);
+    modal.open();
+  }
+
   private setRequestState(requesting: boolean): void {
     if (this.requestInProgress === requesting) {
       return;
@@ -3120,6 +3397,69 @@ export default class WritersRoomPlugin extends Plugin {
       window.clearTimeout(this.requestProgressTimer);
       this.requestProgressTimer = null;
     }
+  }
+
+  private getWritersSystemPrompt(): string {
+    return `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
+
+IMPORTANT: Use your reasoning/thinking process to narrate your editorial thought process as you work. Share brief observations about what you notice (rhythm issues, sensory opportunities, pacing concerns) as you read through the text. This helps the writer understand your editorial perspective.
+
+Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will perform before editing. Keep checklist items conceptual, not implementation-level.
+
+---
+
+### EDITING RULES
+- Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
+- Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
+- After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
+- Categorize each edit by one of the following:
+  1. **flow** — smoothness and clarity of sentences
+  2. **rhythm** — pacing and variation in sentence/phrase length
+  3. **sensory** — imagery, tangible physical details
+  4. **punch** — emotional impact or added emphasis
+
+- Create a summary of the edits and the piece itself as if you were a seasoned editor working with a novelist. All responses should include exactly one summary item.
+- Output edits in **normalized JSON** format as detailed below.
+
+FIELD GUIDELINES
+- \`line\`: Input line number corresponding to the edit.
+- \`type\`:
+  - "addition": only provide newly inserted text
+  - "replacement": rewrite the existing snippet in full with the improved phrasing
+  - "star": mark exemplary text worth celebrating
+  - "subtraction": output must be null (for removed text)
+  - "annotation": no text is added or deleted; output is a brief bracketed comment or suggestion
+- \`category\`: one of "flow", "rhythm", "sensory", or "punch"
+- \`original_text\`: a snippet (phrase or sentence) of the affected text for context
+- \`output\`:
+  - If type = "addition": only the text being inserted
+  - If type = "replacement": the revised text that should replace the original snippet
+  - If type = "star": a concise note explaining why the passage shines (optional if the highlight speaks for itself)
+  - If type = "subtraction": must be null
+  - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
+
+Malformed, empty, or non-line-separated input should result in a JSON object with an empty \`edits\` array and a \`summary\` explaining the issue. Treat the whole input as a single line (\`line: 1\`) if lines are not separable.
+
+TASK
+Analyze the text below and return your JSON of edits. Do not include commentary or output outside the JSON. Your output must always have a \`summary\` with a brief review by the "editor-in-chief."
+
+OUTPUT: A valid JSON object with these fields:
+- \`edits\`: Array of edit objects, each containing:
+  - \`agent\` (string, always "editor")
+  - \`line\` (integer, starting at 1)
+  - \`type\` ("addition", "replacement", "star", "subtraction", or "annotation")
+  - \`category\` ("flow", "rhythm", "sensory", or "punch")
+  - \`original_text\` (string, as found in input)
+  - \`output\` (string or null, as appropriate)
+- \`summary\`: (string) Concise review from the "editor-in-chief" evaluating the result (always required)
+
+Malformed or blank input example:
+\`\`\`json
+{
+  "edits": [],
+  "summary": "Input was malformed or blank; no edits performed."
+}
+\`\`\``;
   }
 
   private getProgressEntriesForSource(sourcePath: string | null): SidebarProgressEntry[] {
@@ -3254,66 +3594,7 @@ export default class WritersRoomPlugin extends Plugin {
     this.audiconPlayer?.play("request-start");
 
     try {
-      const systemPrompt = `You are "editor", a line-level prose editor specializing in precise sentence improvements for fiction writing. Your mission is to make *small, targeted* enhancements to rhythm, flow, sensory detail, and impact, while avoiding full rewrites or changing the original meaning.
-
-IMPORTANT: Use your reasoning/thinking process to narrate your editorial thought process as you work. Share brief observations about what you notice (rhythm issues, sensory opportunities, pacing concerns) as you read through the text. This helps the writer understand your editorial perspective.
-
-Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will perform before editing. Keep checklist items conceptual, not implementation-level.
-
----
-
-### EDITING RULES
-- Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
-- Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
-- After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
-- Categorize each edit by one of the following:
-  1. **flow** — smoothness and clarity of sentences
-  2. **rhythm** — pacing and variation in sentence/phrase length
-  3. **sensory** — imagery, tangible physical details
-  4. **punch** — emotional impact or added emphasis
-
-- Create a summary of the edits and the piece itself as if you were a seasoned editor working with a novelist. All responses should include exactly one summary item.
-- Output edits in **normalized JSON** format as detailed below.
-
-FIELD GUIDELINES
-- \`line\`: Input line number corresponding to the edit.
-- \`type\`:
-  - "addition": only provide newly inserted text
-  - "replacement": rewrite the existing snippet in full with the improved phrasing
-  - "star": mark exemplary text worth celebrating
-  - "subtraction": output must be null (for removed text)
-  - "annotation": no text is added or deleted; output is a brief bracketed comment or suggestion
-- \`category\`: one of "flow", "rhythm", "sensory", or "punch"
-- \`original_text\`: a snippet (phrase or sentence) of the affected text for context
-- \`output\`:
-  - If type = "addition": only the text being inserted
-  - If type = "replacement": the revised text that should replace the original snippet
-  - If type = "star": a concise note explaining why the passage shines (optional if the highlight speaks for itself)
-  - If type = "subtraction": must be null
-  - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
-
-Malformed, empty, or non-line-separated input should result in a JSON object with an empty \`edits\` array and a \`summary\` explaining the issue. Treat the whole input as a single line (\`line: 1\`) if lines are not separable.
-
-TASK
-Analyze the text below and return your JSON of edits. Do not include commentary or output outside the JSON. Your output must always have a \`summary\` with a brief review by the "editor-in-chief."
-
-OUTPUT: A valid JSON object with these fields:
-- \`edits\`: Array of edit objects, each containing:
-  - \`agent\` (string, always "editor")
-  - \`line\` (integer, starting at 1)
-  - \`type\` ("addition", "replacement", "star", "subtraction", or "annotation")
-  - \`category\` ("flow", "rhythm", "sensory", or "punch")
-  - \`original_text\` (string, as found in input)
-  - \`output\` (string or null, as appropriate)
-- \`summary\`: (string) Concise review from the "editor-in-chief" evaluating the result (always required)
-
-Malformed or blank input example:
-\`\`\`json
-{
-  "edits": [],
-  "summary": "Input was malformed or blank; no edits performed."
-}
-\`\`\``;
+      const systemPrompt = this.getWritersSystemPrompt();
 
       const fetchImpl: typeof fetch | null =
         typeof fetch !== "undefined"
@@ -4652,7 +4933,296 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         padding: 1rem 0.9rem;
         color: var(--text-muted);
       }
+
+      .writersroom-quickprompt-suggestion {
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+        padding: 0.3rem 0.4rem;
+      }
+
+      .writersroom-quickprompt-title {
+        font-weight: 600;
+      }
+
+      .writersroom-quickprompt-description {
+        color: var(--text-muted);
+        font-size: 0.8em;
+        line-height: 1.3;
+      }
+
+      .writersroom-quick-result-modal {
+        max-width: 640px;
+      }
+
+      .writersroom-quick-result-header {
+        display: flex;
+        flex-direction: column;
+        gap: 0.5rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .writersroom-quick-result-actions {
+        display: flex;
+        gap: 0.45rem;
+      }
+
+      .writersroom-quick-result-btn {
+        padding: 0.3rem 0.65rem;
+        border-radius: 4px;
+        border: none;
+        cursor: pointer;
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        font-size: 0.8em;
+        font-weight: 500;
+      }
+
+      .writersroom-quick-result-btn:hover {
+        opacity: 0.85;
+      }
+
+      .writersroom-quick-result-meta {
+        display: flex;
+        gap: 0.9rem;
+        flex-wrap: wrap;
+        font-size: 0.8em;
+        color: var(--text-muted);
+      }
+
+      .writersroom-quick-result-meta-item {
+        display: inline-flex;
+        gap: 0.25rem;
+        align-items: center;
+      }
+
+      .writersroom-quick-result-selection {
+        margin-bottom: 0.75rem;
+      }
+
+      .writersroom-quick-result-selection > pre {
+        white-space: pre-wrap;
+        margin-top: 0.4rem;
+      }
+
+      .writersroom-quick-result-body {
+        max-height: 420px;
+        overflow-y: auto;
+        padding-right: 0.2rem;
+      }
+
+      .writersroom-quick-result-code {
+        background: var(--background-secondary);
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        padding: 0.75rem;
+        font-size: 0.85em;
+        line-height: 1.5;
+        white-space: pre-wrap;
+      }
+
+      .writersroom-quick-result-markdown {
+        display: contents;
+      }
     `;
+}
+
+class WritersRoomQuickPromptModal extends SuggestModal<QuickPromptDefinition> {
+  private prompts: QuickPromptDefinition[];
+  private complete: (prompt: QuickPromptDefinition | null) => void;
+  private resolved = false;
+
+  constructor(
+    app: App,
+    prompts: QuickPromptDefinition[],
+    onChoose: (prompt: QuickPromptDefinition | null) => void
+  ) {
+    super(app);
+    this.prompts = prompts;
+    this.complete = onChoose;
+    this.setPlaceholder("Select a quick prompt…");
+    if (typeof this.setInstructions === "function") {
+      this.setInstructions([
+        { command: "↵", purpose: "Run prompt" },
+        { command: "esc", purpose: "Cancel" }
+      ]);
+    }
+  }
+
+  getSuggestions(query: string): QuickPromptDefinition[] {
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) {
+      return this.prompts;
+    }
+
+    return this.prompts.filter((prompt) => {
+      return (
+        prompt.label.toLowerCase().includes(normalized) ||
+        prompt.description.toLowerCase().includes(normalized)
+      );
+    });
+  }
+
+  renderSuggestion(prompt: QuickPromptDefinition, el: HTMLElement): void {
+    el.empty();
+    el.addClass("writersroom-quickprompt-suggestion");
+    el.createDiv({ cls: "writersroom-quickprompt-title", text: prompt.label });
+    el.createEl("small", {
+      cls: "writersroom-quickprompt-description",
+      text: prompt.description
+    });
+  }
+
+  onChooseItem(prompt: QuickPromptDefinition): void {
+    this.resolved = true;
+    this.close();
+    this.complete(prompt);
+  }
+
+  onClose(): void {
+    if (!this.resolved) {
+      this.complete(null);
+    }
+  }
+}
+
+class WritersRoomQuickResultModal extends Modal {
+  private plugin: WritersRoomPlugin;
+  private result: QuickPromptRunResult;
+
+  constructor(app: App, plugin: WritersRoomPlugin, result: QuickPromptRunResult) {
+    super(app);
+    this.plugin = plugin;
+    this.result = result;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("writersroom-quick-result-modal");
+
+    const header = contentEl.createDiv({ cls: "writersroom-quick-result-header" });
+    header.createEl("h2", { text: this.result.prompt.label });
+
+    const actions = header.createDiv({ cls: "writersroom-quick-result-actions" });
+    const copyButton = actions.createEl("button", {
+      cls: "writersroom-quick-result-btn",
+      text: "Copy output"
+    });
+    copyButton.addEventListener("click", () => {
+      void this.copyToClipboard(this.result.content, "Output copied to clipboard.");
+    });
+
+    if (this.result.selection.trim().length > 0) {
+      const copySelectionBtn = actions.createEl("button", {
+        cls: "writersroom-quick-result-btn",
+        text: "Copy selection"
+      });
+      copySelectionBtn.addEventListener("click", () => {
+        void this.copyToClipboard(this.result.selection, "Selection copied to clipboard.");
+      });
+    }
+
+    const meta = header.createDiv({ cls: "writersroom-quick-result-meta" });
+    meta.createEl("span", {
+      cls: "writersroom-quick-result-meta-item",
+      text: `Model: ${this.result.model}`
+    });
+
+    const totalTokens = this.result.usage?.total_tokens;
+    if (typeof totalTokens === "number") {
+      meta.createEl("span", {
+        cls: "writersroom-quick-result-meta-item",
+        text: `${totalTokens} tokens`
+      });
+    }
+
+    if (this.result.sourcePath) {
+      meta.createEl("span", {
+        cls: "writersroom-quick-result-meta-item",
+        text: this.result.sourcePath
+      });
+    }
+
+    if (this.result.selection.trim().length > 0) {
+      const selectionDetails = contentEl.createEl("details", {
+        cls: "writersroom-quick-result-selection"
+      });
+      selectionDetails.createEl("summary", { text: "Selected text" });
+      const selectionPre = selectionDetails.createEl("pre", {
+        cls: "writersroom-quick-result-code"
+      });
+      selectionPre.textContent = this.result.selection;
+    }
+
+    const outputContainer = contentEl.createDiv({
+      cls: "writersroom-quick-result-body"
+    });
+
+    if (this.result.format === "markdown") {
+      const rendered = outputContainer.createDiv({
+        cls: "writersroom-quick-result-markdown"
+      });
+      MarkdownRenderer.renderMarkdown(
+        this.result.content,
+        rendered,
+        this.result.sourcePath ?? "",
+        this
+      );
+    } else {
+      const pre = outputContainer.createEl("pre", {
+        cls: "writersroom-quick-result-code"
+      });
+
+      if (this.result.format === "json") {
+        let formatted = this.result.content;
+        try {
+          const parsed = JSON.parse(this.result.content);
+          formatted = JSON.stringify(parsed, null, 2);
+        } catch (error) {
+          console.warn("[WritersRoom] Failed to parse quick prompt JSON.", error);
+        }
+        pre.textContent = formatted;
+      } else {
+        pre.textContent = this.result.content;
+      }
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+    this.contentEl.removeClass("writersroom-quick-result-modal");
+  }
+
+  private async copyToClipboard(text: string, successMessage: string): Promise<void> {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        new Notice(successMessage);
+        return;
+      }
+    } catch (error) {
+      console.warn("[WritersRoom] Clipboard write failed.", error);
+    }
+
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+
+    try {
+      document.execCommand("copy");
+      new Notice(successMessage);
+    } catch (error) {
+      console.warn("[WritersRoom] Fallback clipboard copy failed.", error);
+      new Notice("Failed to copy to clipboard.");
+    } finally {
+      document.body.removeChild(textarea);
+    }
+  }
 }
 
 class WritersRoomSidebarView extends ItemView {
