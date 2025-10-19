@@ -1210,35 +1210,37 @@ export default class WritersRoomPlugin extends Plugin {
       }
     });
 
+    console.log("About to register: Ask the Writers for edits");
     this.addCommand({
       id: "writers-room-request-ai-edits",
       name: "Ask the Writers for edits",
-      checkCallback: (checking) => {
+      callback: async () => {
         const file = this.app.workspace.getActiveFile();
         if (!file) {
-          return false;
+          new Notice("No active file found");
+          return;
         }
-        if (!checking) {
-          void this.requestAiEditsForActiveFile("external");
-        }
-        return true;
+        await this.requestAiEditsForActiveFile("external");
       }
     });
+    console.log("Registered: Ask the Writers for edits");
 
+    console.log("About to register: Run quick prompt on selection");
     this.addCommand({
       id: "writers-room-run-quick-prompt",
       name: "Run quick prompt on selection",
-      checkCallback: (checking) => {
+      callback: async () => {
+        console.log("Quick prompt command triggered");
         const info = this.getActiveSelectionInfo();
+        console.log("Selection info:", info);
         if (!info || info.selection.trim().length === 0) {
-          return false;
+          new Notice("No text selected");
+          return;
         }
-        if (!checking) {
-          void this.launchQuickPromptFlow(info.selection, info.sourcePath ?? null);
-        }
-        return true;
+        await this.launchQuickPromptFlow(info.selection, info.sourcePath ?? null);
       }
     });
+    console.log("Registered: Run quick prompt on selection");
 
     const workspaceWithLayout = this.app.workspace as unknown as {
       onLayoutReady?: (callback: () => void) => void;

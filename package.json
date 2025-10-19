@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "esbuild --bundle main.ts --outfile=main.js --external:obsidian --external:@codemirror/* --format=cjs --platform=node --target=es2020 --watch",
     "build": "esbuild --bundle main.ts --outfile=main.js --external:obsidian --external:@codemirror/* --format=cjs --platform=node --target=es2020",
+    "deploy": "npm run build && cp main.js '/Users/austen/Documents/Writing Projects/.obsidian/plugins/writersroom/main.js'",
     "test": "vitest run"
   },
   "keywords": [
