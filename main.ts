@@ -438,7 +438,7 @@ const PROVIDER_CONFIGS: Record<LLMProvider, ProviderConfig> = {
     models: {
       fast: "gemini-2.0-flash-lite",
       balanced: "gemini-2.0-flash",
-      quality: "gemini-2.5-pro-preview-06-05"
+      quality: "gemini-3.0-pro"
     },
     defaultModel: "gemini-2.0-flash",
     supportsJsonMode: true,
