@@ -1,9 +1,9 @@
 {
   "id": "writersroom",
   "name": "Writers Room",
-  "version": "0.1.2",
+  "version": "2.0.0",
   "minAppVersion": "1.5.0",
-  "description": "Call ChatGPT prompts by ID and highlight edits (work in progress).",
+  "description": "AI-powered prose editor with agentic workflows and multi-provider LLM support.",
   "author": "Austen",
   "authorUrl": "",
   "fundingUrl": "",
