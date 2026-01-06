@@ -7764,16 +7764,18 @@ class WritersRoomSettingTab extends PluginSettingTab {
     tierDropdown.classList.add("dropdown");
     tierDropdown.style.width = "100%";
 
-    const tiers: Array<{ value: ModelTier; label: string; model: string }> = [
-      { value: "fast", label: "Fast (gpt-4.1-nano)", model: "~$0.10/M tokens" },
-      { value: "balanced", label: "Balanced (gpt-4.1-mini)", model: "~$0.40/M tokens" },
-      { value: "quality", label: "Quality (gpt-4.1)", model: "~$2/M tokens" }
+    // Use current provider's model names
+    const providerModels = PROVIDER_CONFIGS[this.plugin.settings.provider].models;
+    const tiers: Array<{ value: ModelTier; label: string }> = [
+      { value: "fast", label: `Fast (${providerModels.fast})` },
+      { value: "balanced", label: `Balanced (${providerModels.balanced})` },
+      { value: "quality", label: `Quality (${providerModels.quality})` }
     ];
 
-    tiers.forEach(({ value, label, model }) => {
+    tiers.forEach(({ value, label }) => {
       const option = document.createElement("option");
       option.value = value;
-      option.textContent = `${label} — ${model}`;
+      option.textContent = label;
       if (value === this.plugin.settings.modelTier) {
         option.selected = true;
       }
