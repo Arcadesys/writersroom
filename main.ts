@@ -388,6 +388,74 @@ const DEFAULT_AGENT_PROMPT_FOLDER = "WritersRoom Agents";
 const DEFAULT_AGENT_IDS = ["flow", "lens", "punch"] as const;
 const LARGE_FILE_WARNING_THRESHOLD_WORDS = 4000;
 
+// ============================================================================
+// MULTI-PROVIDER LLM SUPPORT
+// ============================================================================
+
+type LLMProvider = "openai" | "anthropic" | "google";
+
+interface ProviderConfig {
+  name: string;
+  envVar: string;
+  baseUrl: string;
+  models: Record<ModelTier, string>;
+  defaultModel: string;
+  supportsJsonMode: boolean;
+  maxTokensParam: string; // Different providers use different param names
+}
+
+const PROVIDER_CONFIGS: Record<LLMProvider, ProviderConfig> = {
+  openai: {
+    name: "OpenAI",
+    envVar: "OPENAI_API_KEY",
+    baseUrl: "https://api.openai.com/v1/chat/completions",
+    models: {
+      fast: "gpt-4.1-nano",
+      balanced: "gpt-4.1-mini", 
+      quality: "gpt-4.1"
+    },
+    defaultModel: "gpt-4.1-mini",
+    supportsJsonMode: true,
+    maxTokensParam: "max_tokens"
+  },
+  anthropic: {
+    name: "Anthropic Claude",
+    envVar: "ANTHROPIC_API_KEY",
+    baseUrl: "https://api.anthropic.com/v1/messages",
+    models: {
+      fast: "claude-3-5-haiku-latest",
+      balanced: "claude-sonnet-4-20250514",
+      quality: "claude-sonnet-4-20250514"
+    },
+    defaultModel: "claude-sonnet-4-20250514",
+    supportsJsonMode: false, // Claude uses system prompt for JSON
+    maxTokensParam: "max_tokens"
+  },
+  google: {
+    name: "Google Gemini",
+    envVar: "GOOGLE_API_KEY",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/models",
+    models: {
+      fast: "gemini-2.0-flash-lite",
+      balanced: "gemini-2.0-flash",
+      quality: "gemini-2.5-pro-preview-06-05"
+    },
+    defaultModel: "gemini-2.0-flash",
+    supportsJsonMode: true,
+    maxTokensParam: "maxOutputTokens"
+  }
+};
+
+// Response format from LLM providers (normalized)
+interface LLMResponse {
+  content: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
 interface AgentPromptDefinition {
   id: string;
   label: string;
@@ -399,12 +467,56 @@ interface AgentPromptDefinition {
   order?: number;
 }
 
+// Agentic workflow modes for cost/quality tradeoff
+type AgenticMode = 
+  | "parallel"     // Run agents in parallel with cheap model, merge results (fastest, cheapest)
+  | "sequential"   // Run agents sequentially, each sees prior edits (better coherence)
+  | "single-shot"; // Legacy: one big call with expensive model (most expensive)
+
+// Model tiers for cost optimization
+type ModelTier = "fast" | "balanced" | "quality";
+
+const MODEL_TIER_MAP: Record<ModelTier, string> = {
+  fast: "gpt-4.1-nano",      // ~$0.10/M tokens - good for simple passes
+  balanced: "gpt-4.1-mini",  // ~$0.40/M tokens - good balance
+  quality: "gpt-4.1"         // ~$2/M tokens - for synthesis/complex edits
+};
+
+// Result from a single agent pass
+interface AgentPassResult {
+  agentId: string;
+  edits: EditEntry[];
+  summary: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+  };
+}
+
+// Chunk info for processing large documents
+interface DocumentChunk {
+  startLine: number;
+  endLine: number;
+  content: string;
+  lineOffset: number; // For adjusting line numbers in results
+}
+
 interface WritersRoomSettings {
   apiKey: string;
   colorScheme: ColorScheme;
   audibleFeedback: boolean; // Enable/disable audicons
   agentPromptFolder: string;
   defaultAgentIds: string[];
+  // Agentic settings
+  agenticMode: AgenticMode;
+  modelTier: ModelTier;
+  maxChunkLines: number; // Max lines per chunk for large docs
+  parallelAgentLimit: number; // Max concurrent agent calls
+  // Multi-provider settings
+  provider: LLMProvider;
+  anthropicApiKey: string;
+  googleApiKey: string;
 }
 
 const DEFAULT_SETTINGS: WritersRoomSettings = {
@@ -412,7 +524,16 @@ const DEFAULT_SETTINGS: WritersRoomSettings = {
   colorScheme: "default",
   audibleFeedback: true,
   agentPromptFolder: DEFAULT_AGENT_PROMPT_FOLDER,
-  defaultAgentIds: [...DEFAULT_AGENT_IDS]
+  defaultAgentIds: [...DEFAULT_AGENT_IDS],
+  // Cost-optimized defaults
+  agenticMode: "parallel",
+  modelTier: "balanced",
+  maxChunkLines: 150,
+  parallelAgentLimit: 3,
+  // Provider defaults
+  provider: "openai",
+  anthropicApiKey: "",
+  googleApiKey: ""
 };
 
 const BUILTIN_AGENT_PROMPT_SEEDS: Array<{
@@ -1071,7 +1192,16 @@ export default class WritersRoomPlugin extends Plugin {
     return null;
   }
 
+  /**
+   * Get the API key for the legacy OpenAI-only path.
+   * @deprecated Use getProviderApiKey() instead for multi-provider support.
+   */
   getResolvedApiKey(): string {
+    // First check provider-specific key via new system
+    const providerKey = this.getProviderApiKeyPublic();
+    if (providerKey) return providerKey;
+    
+    // Fall back to legacy env var
     const fromEnv = this.readEnvVar("WRITERSROOM_API_KEY");
     if (fromEnv) {
       return fromEnv;
@@ -1080,12 +1210,56 @@ export default class WritersRoomPlugin extends Plugin {
     return this.settings.apiKey.trim();
   }
 
+  /**
+   * Public wrapper for getProviderApiKey for use in other parts of the plugin.
+   */
+  getProviderApiKeyPublic(): string {
+    const provider = this.settings.provider;
+    
+    // Check settings first
+    switch (provider) {
+      case "openai":
+        if (this.settings.apiKey) return this.settings.apiKey;
+        break;
+      case "anthropic":
+        if (this.settings.anthropicApiKey) return this.settings.anthropicApiKey;
+        break;
+      case "google":
+        if (this.settings.googleApiKey) return this.settings.googleApiKey;
+        break;
+    }
+
+    // Fall back to environment variables
+    const config = PROVIDER_CONFIGS[provider];
+    const envKey = this.readEnvVar(config.envVar);
+    if (envKey) return envKey;
+
+    // Also check legacy WRITERSROOM_API_KEY for OpenAI
+    if (provider === "openai") {
+      const legacyKey = this.readEnvVar("WRITERSROOM_API_KEY");
+      if (legacyKey) return legacyKey;
+    }
+
+    return "";
+  }
+
   hasResolvedApiKey(): boolean {
-    return this.getResolvedApiKey().length > 0;
+    return this.getProviderApiKeyPublic().length > 0;
   }
 
   isUsingEnvironmentApiKey(): boolean {
-    return this.readEnvVar("WRITERSROOM_API_KEY").length > 0;
+    const provider = this.settings.provider;
+    const config = PROVIDER_CONFIGS[provider];
+    
+    // Check provider-specific env var
+    if (this.readEnvVar(config.envVar).length > 0) return true;
+    
+    // Also check legacy env var for OpenAI
+    if (provider === "openai" && this.readEnvVar("WRITERSROOM_API_KEY").length > 0) {
+      return true;
+    }
+    
+    return false;
   }
 
   private resolveStoredData(raw: unknown): {
@@ -1117,7 +1291,40 @@ export default class WritersRoomPlugin extends Plugin {
             ? settingsRaw.audibleFeedback
             : DEFAULT_SETTINGS.audibleFeedback,
         agentPromptFolder: this.normalizeAgentPromptFolder(agentFolderRaw),
-        defaultAgentIds: this.normalizeAgentIds(settingsRaw.defaultAgentIds)
+        defaultAgentIds: this.normalizeAgentIds(settingsRaw.defaultAgentIds),
+        // Agentic workflow settings
+        agenticMode:
+          typeof settingsRaw.agenticMode === "string" &&
+          ["parallel", "sequential", "single-shot"].includes(settingsRaw.agenticMode)
+            ? (settingsRaw.agenticMode as AgenticMode)
+            : DEFAULT_SETTINGS.agenticMode,
+        modelTier:
+          typeof settingsRaw.modelTier === "string" &&
+          ["fast", "balanced", "quality"].includes(settingsRaw.modelTier)
+            ? (settingsRaw.modelTier as ModelTier)
+            : DEFAULT_SETTINGS.modelTier,
+        maxChunkLines:
+          typeof settingsRaw.maxChunkLines === "number"
+            ? settingsRaw.maxChunkLines
+            : DEFAULT_SETTINGS.maxChunkLines,
+        parallelAgentLimit:
+          typeof settingsRaw.parallelAgentLimit === "number"
+            ? settingsRaw.parallelAgentLimit
+            : DEFAULT_SETTINGS.parallelAgentLimit,
+        // Multi-provider settings
+        provider:
+          typeof settingsRaw.provider === "string" &&
+          ["openai", "anthropic", "google"].includes(settingsRaw.provider)
+            ? (settingsRaw.provider as LLMProvider)
+            : DEFAULT_SETTINGS.provider,
+        anthropicApiKey:
+          typeof settingsRaw.anthropicApiKey === "string"
+            ? settingsRaw.anthropicApiKey
+            : DEFAULT_SETTINGS.anthropicApiKey,
+        googleApiKey:
+          typeof settingsRaw.googleApiKey === "string"
+            ? settingsRaw.googleApiKey
+            : DEFAULT_SETTINGS.googleApiKey
       };
 
       const editsRaw = record.edits;
@@ -4103,6 +4310,835 @@ Malformed or blank input example:
 \`\`\``;
   }
 
+  // ============================================================================
+  // AGENTIC WORKFLOW INFRASTRUCTURE
+  // ============================================================================
+
+  /**
+   * Build a focused system prompt for a single agent pass.
+   * Much smaller than the combined prompt - reduces token usage significantly.
+   */
+  private buildSingleAgentPrompt(agent: AgentPromptDefinition): string {
+    return `You are "${agent.id}", a specialized prose editor. ${agent.description}
+
+YOUR CHARTER:
+${agent.content.trim()}
+
+---
+
+### EDITING RULES
+- Work line by line; blank lines are untouchable.
+- Suggest only the *smallest necessary* changes aligned with your specialty.
+- Use "star" edits to celebrate exemplary lines worth keeping.
+- Be selective: only flag lines that genuinely need your expertise.
+
+### RESPONSE FORMAT
+Return ONLY a JSON object:
+{
+  "summary": "1-2 sentence overview of your ${agent.id} pass",
+  "edits": [
+    {
+      "agent": "${agent.id}",
+      "line": <integer>,
+      "type": "addition" | "replacement" | "star" | "subtraction" | "annotation",
+      "category": "${agent.id}",
+      "original_text": "<exact source text>",
+      "output": "<revised text or annotation>" 
+    }
+  ]
+}
+
+If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments needed."}`;
+  }
+
+  /**
+   * Chunk a document into smaller pieces for parallel processing.
+   * Preserves context overlap for better coherence.
+   */
+  private chunkDocument(content: string, maxLines: number): DocumentChunk[] {
+    const lines = content.split("\n");
+    const chunks: DocumentChunk[] = [];
+    const overlapLines = Math.min(5, Math.floor(maxLines * 0.1)); // 10% overlap, min 5 lines
+
+    let startLine = 0;
+    while (startLine < lines.length) {
+      const endLine = Math.min(startLine + maxLines, lines.length);
+      const chunkLines = lines.slice(startLine, endLine);
+      
+      chunks.push({
+        startLine: startLine + 1, // 1-indexed for consistency with edit line numbers
+        endLine,
+        content: chunkLines.join("\n"),
+        lineOffset: startLine
+      });
+
+      // Move forward, minus overlap (except for last chunk)
+      startLine = endLine - overlapLines;
+      if (startLine >= lines.length - overlapLines) {
+        break;
+      }
+    }
+
+    return chunks;
+  }
+
+  // ============================================================================
+  // MULTI-PROVIDER LLM ABSTRACTION
+  // ============================================================================
+
+  /**
+   * Get the API key for the current provider.
+   */
+  private getProviderApiKey(): string {
+    const provider = this.settings.provider;
+    
+    // Check settings first
+    switch (provider) {
+      case "openai":
+        if (this.settings.apiKey) return this.settings.apiKey;
+        break;
+      case "anthropic":
+        if (this.settings.anthropicApiKey) return this.settings.anthropicApiKey;
+        break;
+      case "google":
+        if (this.settings.googleApiKey) return this.settings.googleApiKey;
+        break;
+    }
+
+    // Fall back to environment variables
+    const envVar = PROVIDER_CONFIGS[provider].envVar;
+    if (typeof process !== "undefined" && process.env?.[envVar]) {
+      return process.env[envVar] as string;
+    }
+
+    return "";
+  }
+
+  /**
+   * Get the model name for the current provider and tier.
+   */
+  private getProviderModel(overrideModel?: string): string {
+    if (overrideModel) return overrideModel;
+    
+    const config = PROVIDER_CONFIGS[this.settings.provider];
+    return config.models[this.settings.modelTier] ?? config.defaultModel;
+  }
+
+  /**
+   * Make an LLM API call, abstracting away provider differences.
+   */
+  private async callLLM(
+    systemPrompt: string,
+    userMessage: string,
+    options: {
+      model?: string;
+      temperature?: number;
+      jsonMode?: boolean;
+      stream?: boolean;
+    } = {}
+  ): Promise<LLMResponse> {
+    const provider = this.settings.provider;
+    const config = PROVIDER_CONFIGS[provider];
+    const apiKey = this.getProviderApiKey();
+    
+    if (!apiKey) {
+      throw new Error(`No API key configured for ${config.name}. Add it in Writers Room settings.`);
+    }
+
+    const model = options.model ?? this.getProviderModel();
+    const temperature = options.temperature ?? 0.3;
+
+    const fetchImpl: typeof fetch | null =
+      typeof fetch !== "undefined"
+        ? fetch
+        : typeof window !== "undefined" && typeof window.fetch === "function"
+          ? window.fetch.bind(window)
+          : null;
+
+    if (!fetchImpl) {
+      throw new Error("Fetch API is unavailable.");
+    }
+
+    switch (provider) {
+      case "openai":
+        return this.callOpenAI(fetchImpl, apiKey, model, systemPrompt, userMessage, temperature, options);
+      case "anthropic":
+        return this.callAnthropic(fetchImpl, apiKey, model, systemPrompt, userMessage, temperature, options);
+      case "google":
+        return this.callGoogle(fetchImpl, apiKey, model, systemPrompt, userMessage, temperature, options);
+      default:
+        throw new Error(`Unknown provider: ${provider}`);
+    }
+  }
+
+  /**
+   * OpenAI API call implementation.
+   */
+  private async callOpenAI(
+    fetchImpl: typeof fetch,
+    apiKey: string,
+    model: string,
+    systemPrompt: string,
+    userMessage: string,
+    temperature: number,
+    options: { jsonMode?: boolean; stream?: boolean }
+  ): Promise<LLMResponse> {
+    const body: Record<string, unknown> = {
+      model,
+      temperature,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ]
+    };
+
+    if (options.jsonMode) {
+      body.response_format = { type: "json_object" };
+    }
+
+    if (options.stream) {
+      body.stream = true;
+      body.stream_options = { include_usage: true };
+    }
+
+    const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 300)}`);
+    }
+
+    if (options.stream) {
+      return this.handleOpenAIStream(response);
+    }
+
+    const data = await response.json() as {
+      choices?: Array<{ message?: { content?: string } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+    };
+
+    return {
+      content: data.choices?.[0]?.message?.content ?? "",
+      usage: data.usage
+    };
+  }
+
+  /**
+   * Handle OpenAI streaming response.
+   */
+  private async handleOpenAIStream(response: Response): Promise<LLMResponse> {
+    if (!response.body) {
+      throw new Error("OpenAI response did not include a readable stream.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let content = "";
+    let buffer = "";
+    let usage: LLMResponse["usage"];
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === "data: [DONE]") continue;
+          if (!trimmed.startsWith("data: ")) continue;
+
+          try {
+            const chunk = JSON.parse(trimmed.slice(6)) as {
+              choices?: Array<{ delta?: { content?: string } }>;
+              usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number };
+            };
+
+            if (chunk.choices?.[0]?.delta?.content) {
+              content += chunk.choices[0].delta.content;
+            }
+            if (chunk.usage) {
+              usage = chunk.usage;
+            }
+          } catch {
+            // Ignore parse errors in stream
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    return { content, usage };
+  }
+
+  /**
+   * Anthropic Claude API call implementation.
+   */
+  private async callAnthropic(
+    fetchImpl: typeof fetch,
+    apiKey: string,
+    model: string,
+    systemPrompt: string,
+    userMessage: string,
+    temperature: number,
+    options: { jsonMode?: boolean }
+  ): Promise<LLMResponse> {
+    // Claude doesn't have a JSON mode, so we append instructions to the system prompt
+    let finalSystemPrompt = systemPrompt;
+    if (options.jsonMode) {
+      finalSystemPrompt += "\n\nIMPORTANT: Respond with ONLY valid JSON. No markdown, no explanations, just the JSON object.";
+    }
+
+    const response = await fetchImpl("https://api.anthropic.com/v1/messages", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": apiKey,
+        "anthropic-version": "2023-06-01"
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 8192,
+        system: finalSystemPrompt,
+        messages: [
+          { role: "user", content: userMessage }
+        ],
+        temperature
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Anthropic request failed (${response.status}): ${errorText.slice(0, 300)}`);
+    }
+
+    const data = await response.json() as {
+      content?: Array<{ type: string; text?: string }>;
+      usage?: { input_tokens?: number; output_tokens?: number };
+    };
+
+    const textContent = data.content?.find(c => c.type === "text")?.text ?? "";
+
+    return {
+      content: textContent,
+      usage: data.usage ? {
+        prompt_tokens: data.usage.input_tokens,
+        completion_tokens: data.usage.output_tokens,
+        total_tokens: (data.usage.input_tokens ?? 0) + (data.usage.output_tokens ?? 0)
+      } : undefined
+    };
+  }
+
+  /**
+   * Google Gemini API call implementation.
+   */
+  private async callGoogle(
+    fetchImpl: typeof fetch,
+    apiKey: string,
+    model: string,
+    systemPrompt: string,
+    userMessage: string,
+    temperature: number,
+    options: { jsonMode?: boolean }
+  ): Promise<LLMResponse> {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+
+    const body: Record<string, unknown> = {
+      contents: [
+        {
+          role: "user",
+          parts: [{ text: userMessage }]
+        }
+      ],
+      systemInstruction: {
+        parts: [{ text: systemPrompt }]
+      },
+      generationConfig: {
+        temperature,
+        maxOutputTokens: 8192
+      }
+    };
+
+    if (options.jsonMode) {
+      (body.generationConfig as Record<string, unknown>).responseMimeType = "application/json";
+    }
+
+    const response = await fetchImpl(url, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Google Gemini request failed (${response.status}): ${errorText.slice(0, 300)}`);
+    }
+
+    const data = await response.json() as {
+      candidates?: Array<{
+        content?: { parts?: Array<{ text?: string }> };
+      }>;
+      usageMetadata?: {
+        promptTokenCount?: number;
+        candidatesTokenCount?: number;
+        totalTokenCount?: number;
+      };
+    };
+
+    const textContent = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
+    return {
+      content: textContent,
+      usage: data.usageMetadata ? {
+        prompt_tokens: data.usageMetadata.promptTokenCount,
+        completion_tokens: data.usageMetadata.candidatesTokenCount,
+        total_tokens: data.usageMetadata.totalTokenCount
+      } : undefined
+    };
+  }
+
+  // ============================================================================
+  // END MULTI-PROVIDER LLM ABSTRACTION
+  // ============================================================================
+
+  /**
+   * Execute a single agent pass against content.
+   * Returns edits from that agent's perspective.
+   */
+  private async executeAgentPass(
+    agent: AgentPromptDefinition,
+    content: string,
+    _apiKey: string, // Kept for backward compatibility, now uses provider abstraction
+    lineOffset: number = 0
+  ): Promise<AgentPassResult> {
+    const model = agent.model ?? this.getProviderModel();
+    const temperature = agent.temperature ?? 0.3;
+    const systemPrompt = this.buildSingleAgentPrompt(agent);
+
+    const llmResponse = await this.callLLM(systemPrompt, content, {
+      model,
+      temperature,
+      jsonMode: true
+    });
+
+    const jsonText = this.extractJsonFromResponse(llmResponse.content);
+    
+    if (!jsonText) {
+      return {
+        agentId: agent.id,
+        edits: [],
+        summary: `${agent.label} returned no structured edits.`,
+        usage: llmResponse.usage
+      };
+    }
+
+    try {
+      const parsed = JSON.parse(jsonText) as { edits?: unknown[]; summary?: string };
+      const edits: EditEntry[] = [];
+
+      if (Array.isArray(parsed.edits)) {
+        for (let i = 0; i < parsed.edits.length; i++) {
+          const raw = parsed.edits[i] as Record<string, unknown>;
+          if (!raw || typeof raw !== "object") continue;
+
+          // Adjust line numbers for chunk offset
+          const adjustedLine = (typeof raw.line === "number" ? raw.line : 1) + lineOffset;
+          
+          const entry: EditEntry = {
+            agent: agent.id,
+            anchor: createEditAnchorId({
+              line: adjustedLine,
+              type: (raw.type as EditEntry["type"]) ?? "annotation",
+              category: agent.id,
+              original_text: String(raw.original_text ?? ""),
+              output: raw.output === null ? null : String(raw.output ?? "")
+            }, i),
+            line: adjustedLine,
+            type: (raw.type as EditEntry["type"]) ?? "annotation",
+            category: agent.id,
+            original_text: String(raw.original_text ?? ""),
+            output: raw.output === null ? null : String(raw.output ?? "")
+          };
+
+          edits.push(entry);
+        }
+      }
+
+      return {
+        agentId: agent.id,
+        edits,
+        summary: typeof parsed.summary === "string" ? parsed.summary : `${agent.label} pass complete.`,
+        usage: llmResponse.usage
+      };
+    } catch (parseError) {
+      this.logWarn(`Failed to parse ${agent.id} response`, { error: parseError });
+      return {
+        agentId: agent.id,
+        edits: [],
+        summary: `${agent.label} response could not be parsed.`,
+        usage: llmResponse.usage
+      };
+    }
+  }
+
+  /**
+   * Merge edits from multiple agent passes.
+   * Handles conflicts by preferring the first agent's edit on a given line,
+   * but preserves annotations from other agents.
+   */
+  private mergeAgentResults(results: AgentPassResult[]): EditPayload {
+    const editsByLine = new Map<number, EditEntry[]>();
+    const summaries: string[] = [];
+    let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+
+    for (const result of results) {
+      summaries.push(`**${result.agentId}**: ${result.summary}`);
+      
+      if (result.usage) {
+        totalUsage.prompt_tokens += result.usage.prompt_tokens ?? 0;
+        totalUsage.completion_tokens += result.usage.completion_tokens ?? 0;
+        totalUsage.total_tokens += result.usage.total_tokens ?? 0;
+      }
+
+      for (const edit of result.edits) {
+        const existing = editsByLine.get(edit.line) || [];
+        existing.push(edit);
+        editsByLine.set(edit.line, existing);
+      }
+    }
+
+    // Merge edits, handling conflicts
+    const mergedEdits: EditEntry[] = [];
+    
+    for (const [line, lineEdits] of editsByLine) {
+      if (lineEdits.length === 1) {
+        mergedEdits.push(lineEdits[0]);
+        continue;
+      }
+
+      // Separate annotations from substantive edits
+      const annotations = lineEdits.filter(e => e.type === "annotation");
+      const stars = lineEdits.filter(e => e.type === "star");
+      const substantive = lineEdits.filter(e => e.type !== "annotation" && e.type !== "star");
+
+      // Keep the first substantive edit (if any)
+      if (substantive.length > 0) {
+        const primary = substantive[0];
+        // Merge annotations into the primary edit
+        if (annotations.length > 0) {
+          primary.annotation = annotations.map(a => a.output).filter(Boolean).join(" | ");
+        }
+        mergedEdits.push(primary);
+      } else if (stars.length > 0) {
+        // If only stars, keep the first one
+        mergedEdits.push(stars[0]);
+      } else if (annotations.length > 0) {
+        // Combine all annotations
+        const combined = annotations[0];
+        if (annotations.length > 1) {
+          combined.output = annotations.map(a => a.output).filter(Boolean).join(" | ");
+        }
+        mergedEdits.push(combined);
+      }
+    }
+
+    // Sort by line number
+    mergedEdits.sort((a, b) => a.line - b.line);
+
+    // Regenerate anchors to ensure uniqueness after merge
+    for (let i = 0; i < mergedEdits.length; i++) {
+      mergedEdits[i].anchor = createEditAnchorId(mergedEdits[i], i);
+    }
+
+    this.log("debug", "Merged agent results", {
+      agents: results.map(r => r.agentId),
+      totalEdits: mergedEdits.length,
+      usage: totalUsage
+    });
+
+    return {
+      summary: summaries.join("\n\n"),
+      edits: mergedEdits
+    };
+  }
+
+  /**
+   * Run agents in parallel for maximum speed and cost efficiency.
+   * Each agent works independently on the same content.
+   */
+  private async runAgentsParallel(
+    agents: AgentPromptDefinition[],
+    content: string,
+    apiKey: string
+  ): Promise<EditPayload> {
+    const limit = this.settings.parallelAgentLimit;
+    const results: AgentPassResult[] = [];
+    
+    // Process in batches to respect rate limits
+    for (let i = 0; i < agents.length; i += limit) {
+      const batch = agents.slice(i, i + limit);
+      const batchNames = batch.map(a => a.label).join(", ");
+      this.advanceRequestProgress(`Running ${batchNames}...`);
+      
+      const batchResults = await Promise.all(
+        batch.map(agent => this.executeAgentPass(agent, content, apiKey))
+      );
+      
+      results.push(...batchResults);
+    }
+
+    return this.mergeAgentResults(results);
+  }
+
+  /**
+   * Run agents sequentially, each building on the previous output.
+   * Better coherence but slower and slightly more expensive.
+   */
+  private async runAgentsSequential(
+    agents: AgentPromptDefinition[],
+    content: string,
+    apiKey: string
+  ): Promise<EditPayload> {
+    const results: AgentPassResult[] = [];
+    let currentContent = content;
+
+    for (const agent of agents) {
+      this.advanceRequestProgress(`${agent.label} is reviewing...`);
+      
+      const result = await this.executeAgentPass(agent, currentContent, apiKey);
+      results.push(result);
+
+      // Apply replacements to content for next agent (simple version)
+      // In production, you might want more sophisticated content transformation
+      for (const edit of result.edits) {
+        if (edit.type === "replacement" && edit.output) {
+          currentContent = currentContent.replace(edit.original_text, edit.output);
+        }
+      }
+    }
+
+    return this.mergeAgentResults(results);
+  }
+
+  /**
+   * Process a large document by chunking it.
+   * Runs the agentic workflow on each chunk then combines results.
+   */
+  private async processLargeDocumentAgentically(
+    agents: AgentPromptDefinition[],
+    content: string,
+    apiKey: string
+  ): Promise<EditPayload> {
+    const chunks = this.chunkDocument(content, this.settings.maxChunkLines);
+    
+    if (chunks.length === 1) {
+      // Document fits in one chunk, use normal flow
+      return this.settings.agenticMode === "sequential"
+        ? this.runAgentsSequential(agents, content, apiKey)
+        : this.runAgentsParallel(agents, content, apiKey);
+    }
+
+    this.advanceRequestProgress(`Processing ${chunks.length} sections...`);
+    const allResults: AgentPassResult[] = [];
+
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      this.advanceRequestProgress(`Section ${i + 1}/${chunks.length}...`);
+
+      // Run agents on this chunk
+      const chunkAgentResults = await Promise.all(
+        agents.map(agent => this.executeAgentPass(agent, chunk.content, apiKey, chunk.lineOffset))
+      );
+
+      allResults.push(...chunkAgentResults);
+    }
+
+    return this.mergeAgentResults(allResults);
+  }
+
+  /**
+   * Legacy single-shot workflow: one large call with expensive model.
+   * Kept for backward compatibility and quality comparison.
+   * Now uses provider abstraction for multi-provider support.
+   */
+  private async runSingleShotWorkflow(
+    content: string,
+    agentIds: string[],
+    _apiKey: string // Kept for backward compatibility
+  ): Promise<EditPayload> {
+    const systemPrompt = this.buildSystemPromptForAgents(agentIds);
+    const provider = this.settings.provider;
+    const config = PROVIDER_CONFIGS[provider];
+
+    // For single-shot, use the quality tier model
+    const model = config.models.quality;
+
+    this.advanceRequestProgress(`Processing with ${config.name}... please be patient, this may take several minutes…`);
+    
+    // Use streaming for OpenAI (supports progress updates), non-streaming for others
+    const useStreaming = provider === "openai";
+
+    if (useStreaming && provider === "openai") {
+      // OpenAI streaming path with progress updates
+      return this.runSingleShotOpenAIStreaming(systemPrompt, content, model);
+    } else {
+      // Non-streaming path for other providers
+      const llmResponse = await this.callLLM(systemPrompt, content, {
+        model,
+        temperature: 0.3,
+        jsonMode: true
+      });
+
+      this.advanceRequestProgress("Almost done…");
+
+      if (!llmResponse.content.trim()) {
+        throw new Error(`${config.name} response did not include text content.`);
+      }
+
+      const jsonText = this.extractJsonFromResponse(llmResponse.content);
+      if (!jsonText) {
+        throw new Error(`${config.name} response did not include a JSON payload.`);
+      }
+
+      return this.parseAiPayload(jsonText);
+    }
+  }
+
+  /**
+   * OpenAI-specific streaming for single-shot workflow.
+   * Provides progress updates via reasoning_content.
+   */
+  private async runSingleShotOpenAIStreaming(
+    systemPrompt: string,
+    content: string,
+    model: string
+  ): Promise<EditPayload> {
+    const apiKey = this.getProviderApiKey();
+    
+    const fetchImpl: typeof fetch | null =
+      typeof fetch !== "undefined"
+        ? fetch
+        : typeof window !== "undefined" && typeof window.fetch === "function"
+          ? window.fetch.bind(window)
+          : null;
+
+    if (!fetchImpl) {
+      throw new Error("Fetch API is unavailable in this environment.");
+    }
+
+    const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content }
+        ],
+        stream: true,
+        stream_options: { include_usage: true }
+      })
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
+    }
+
+    if (!response.body) {
+      throw new Error("OpenAI response did not include a readable stream.");
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let completion = "";
+    let buffer = "";
+    let lastReasoningUpdate = Date.now();
+    const reasoningThrottleMs = 300;
+    let accumulatedReasoning = "";
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed === "data: [DONE]") continue;
+          if (!trimmed.startsWith("data: ")) continue;
+
+          try {
+            const chunk = JSON.parse(trimmed.slice(6)) as {
+              choices?: Array<{
+                delta?: { content?: string; reasoning_content?: string };
+              }>;
+            };
+
+            const delta = chunk.choices?.[0]?.delta;
+            if (delta?.content) {
+              completion += delta.content;
+            }
+            if (delta?.reasoning_content) {
+              accumulatedReasoning += delta.reasoning_content;
+              const now = Date.now();
+              if (now - lastReasoningUpdate >= reasoningThrottleMs) {
+                const sentences = accumulatedReasoning.trim().split(/[.!?]\s+/);
+                const latest = sentences[sentences.length - 1] || "";
+                if (latest) {
+                  this.updateActiveProgressMessage(
+                    latest.length > 120 ? `${latest.slice(0, 117)}...` : latest
+                  );
+                  lastReasoningUpdate = now;
+                }
+              }
+            }
+          } catch {
+            // Ignore parse errors in stream
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    this.advanceRequestProgress("Almost done…");
+
+    if (!completion.trim()) {
+      throw new Error("OpenAI response did not include text content.");
+    }
+
+    const jsonText = this.extractJsonFromResponse(completion);
+    if (!jsonText) {
+      throw new Error("OpenAI response did not include a JSON payload.");
+    }
+
+    return this.parseAiPayload(jsonText);
+  }
+
+  // ============================================================================
+  // END AGENTIC WORKFLOW INFRASTRUCTURE  
+  // ============================================================================
+
   private getProgressEntriesForSource(sourcePath: string | null): SidebarProgressEntry[] {
     if (!sourcePath || this.requestProgressSource !== sourcePath) {
       return [];
@@ -4283,156 +5319,35 @@ Malformed or blank input example:
     this.audiconPlayer?.play("request-start");
 
     try {
-      const systemPrompt = this.buildSystemPromptForAgents(activeAgentIds);
       this.activeRunAgentIds = [...activeAgentIds];
 
-      const fetchImpl: typeof fetch | null =
-        typeof fetch !== "undefined"
-          ? fetch
-          : typeof window !== "undefined" && typeof window.fetch === "function"
-            ? window.fetch.bind(window)
-            : null;
+      let payload: EditPayload;
 
-      if (!fetchImpl) {
-        throw new Error("Fetch API is unavailable in this environment.");
-      }
+      // Choose workflow based on agentic mode setting
+      if (this.settings.agenticMode === "single-shot") {
+        // Legacy mode: one big expensive call
+        payload = await this.runSingleShotWorkflow(noteContents, activeAgentIds, apiKey);
+      } else {
+        // Agentic mode: smaller, cheaper, parallel calls
+        const lineCount = noteContents.split("\n").length;
+        const useChunking = lineCount > this.settings.maxChunkLines;
 
-      this.advanceRequestProgress("Processing... please be patient, this may take several minutes…");
-      const response = await fetchImpl("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`
-        },
-        body: JSON.stringify({
-          model: "gpt-5",
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: noteContents }
-          ],
-          stream: true,
-          stream_options: {
-            include_usage: true
-          }
-        })
-      });
+        this.advanceRequestProgress(
+          useChunking 
+            ? `Processing ${Math.ceil(lineCount / this.settings.maxChunkLines)} sections with ${agentNames}...`
+            : `Running ${agentNames} in ${this.settings.agenticMode} mode...`
+        );
 
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`OpenAI request failed (${response.status}): ${errorText.slice(0, 500)}`);
-      }
-
-      if (!response.body) {
-        throw new Error("OpenAI response did not include a readable stream.");
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let completion = "";
-      let buffer = "";
-      let lastReasoningUpdate = Date.now();
-      let lastProgressUpdate = Date.now();
-      const reasoningThrottleMs = 300;
-      const progressUpdateMs = 1000; // Update progress every second
-      let accumulatedReasoning = "";
-      let hasReceivedAnyData = false;
-      let tokensReceived = 0;
-
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            break;
-          }
-
-          hasReceivedAnyData = true;
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed || trimmed === "data: [DONE]") {
-              continue;
-            }
-
-            if (!trimmed.startsWith("data: ")) {
-              continue;
-            }
-
-            const jsonStr = trimmed.slice(6);
-            try {
-              const chunk = JSON.parse(jsonStr) as {
-                choices?: Array<{
-                  delta?: {
-                    content?: string;
-                    reasoning_content?: string;
-                  };
-                  finish_reason?: string | null;
-                }>;
-                usage?: {
-                  prompt_tokens?: number;
-                  completion_tokens?: number;
-                  total_tokens?: number;
-                };
-              };
-
-              // Check for usage information (sent in final chunk when include_usage is true)
-              if (chunk.usage?.completion_tokens) {
-                tokensReceived = chunk.usage.completion_tokens;
-              }
-
-              const delta = chunk.choices?.[0]?.delta;
-              if (!delta) {
-                continue;
-              }
-
-              if (delta.content) {
-                completion += delta.content;
-                // Estimate tokens as we go (roughly 4 characters per token)
-                tokensReceived = Math.floor(completion.length / 4);
-              }
-
-              if (delta.reasoning_content) {
-                accumulatedReasoning += delta.reasoning_content;
-                const now = Date.now();
-                if (now - lastReasoningUpdate >= reasoningThrottleMs) {
-                  const reasoning = accumulatedReasoning.trim();
-                  if (reasoning.length > 0) {
-                    // Extract the most recent sentence or clause for display
-                    const sentences = reasoning.split(/[.!?]\s+/);
-                    const latestSentence = sentences[sentences.length - 1] || reasoning;
-                    const display = latestSentence.length > 120
-                      ? `${latestSentence.slice(0, 117)}...`
-                      : latestSentence;
-                    this.updateActiveProgressMessage(display);
-                    lastReasoningUpdate = now;
-                  }
-                }
-              }
-            } catch (parseError) {
-              this.logWarn("Failed to parse streaming chunk.", { line: trimmed, error: parseError });
-            }
-          }
+        if (useChunking) {
+          payload = await this.processLargeDocumentAgentically(agentDefinitions, noteContents, apiKey);
+        } else if (this.settings.agenticMode === "sequential") {
+          payload = await this.runAgentsSequential(agentDefinitions, noteContents, apiKey);
+        } else {
+          payload = await this.runAgentsParallel(agentDefinitions, noteContents, apiKey);
         }
-      } finally {
-        reader.releaseLock();
       }
 
-      this.advanceRequestProgress("Almost done…");
-
-      if (typeof completion !== "string" || completion.trim().length === 0) {
-        throw new Error("OpenAI response did not include text content.");
-      }
-
-      const jsonText = this.extractJsonFromResponse(completion);
-      if (!jsonText) {
-        throw new Error("OpenAI response did not include a JSON payload.");
-      }
-
-    this.advanceRequestProgress("Finalizing your edits…");
-
-    const payload = this.parseAiPayload(jsonText);
+      this.advanceRequestProgress("Finalizing your edits…");
 
       await this.ensureFolder("edits");
       await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
@@ -6626,24 +7541,123 @@ class WritersRoomSettingTab extends PluginSettingTab {
 
     containerEl.createEl("h2", { text: "Writers Room Settings" });
 
-    const envOverrideActive = this.plugin.isUsingEnvironmentApiKey();
-    const apiKeyDescription =
-      "Store the secret key used when calling the OpenAI API. Set the WRITERSROOM_API_KEY environment variable to override this value." +
-      (envOverrideActive ? " (Environment override detected.)" : "");
+    // ============================================================================
+    // LLM PROVIDER SETTINGS
+    // ============================================================================
+    containerEl.createEl("h3", { text: "LLM Provider" });
 
-    new Setting(containerEl)
-      .setName("OpenAI API Key")
-      .setDesc(apiKeyDescription)
-      .addText((text: TextComponent) => {
-        text
-          .setPlaceholder("sk-...")
-          .setValue(this.plugin.settings.apiKey)
-          .onChange(async (value: string) => {
-            this.plugin.settings.apiKey = value.trim();
-            await this.plugin.saveSettings();
-          });
-        text.inputEl.type = "password";
-      });
+    // Provider selection
+    const providerSetting = new Setting(containerEl)
+      .setName("AI Provider")
+      .setDesc("Choose which AI service to use for editing suggestions.");
+
+    const providerDropdown = document.createElement("select");
+    providerDropdown.classList.add("dropdown");
+    providerDropdown.style.width = "100%";
+
+    const providers: Array<{ value: LLMProvider; label: string }> = [
+      { value: "openai", label: "OpenAI (GPT)" },
+      { value: "anthropic", label: "Anthropic (Claude)" },
+      { value: "google", label: "Google (Gemini)" }
+    ];
+
+    providers.forEach(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (value === this.plugin.settings.provider) {
+        option.selected = true;
+      }
+      providerDropdown.appendChild(option);
+    });
+
+    providerDropdown.addEventListener("change", async () => {
+      this.plugin.settings.provider = providerDropdown.value as LLMProvider;
+      await this.plugin.saveSettings();
+      // Refresh display to show/hide relevant API key fields
+      this.display();
+    });
+
+    (providerSetting as any).controlEl.appendChild(providerDropdown);
+
+    // OpenAI API Key
+    const openaiKeyVisible = this.plugin.settings.provider === "openai";
+    if (openaiKeyVisible) {
+      const envOverrideActive = this.plugin.isUsingEnvironmentApiKey();
+      const apiKeyDescription =
+        "Your OpenAI API key. Set OPENAI_API_KEY environment variable to override." +
+        (envOverrideActive ? " (Environment override detected.)" : "");
+
+      new Setting(containerEl)
+        .setName("OpenAI API Key")
+        .setDesc(apiKeyDescription)
+        .addText((text: TextComponent) => {
+          text
+            .setPlaceholder("sk-...")
+            .setValue(this.plugin.settings.apiKey)
+            .onChange(async (value: string) => {
+              this.plugin.settings.apiKey = value.trim();
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.type = "password";
+        });
+    }
+
+    // Anthropic API Key
+    const anthropicKeyVisible = this.plugin.settings.provider === "anthropic";
+    if (anthropicKeyVisible) {
+      new Setting(containerEl)
+        .setName("Anthropic API Key")
+        .setDesc("Your Anthropic API key for Claude. Set ANTHROPIC_API_KEY environment variable to override.")
+        .addText((text: TextComponent) => {
+          text
+            .setPlaceholder("sk-ant-...")
+            .setValue(this.plugin.settings.anthropicApiKey)
+            .onChange(async (value: string) => {
+              this.plugin.settings.anthropicApiKey = value.trim();
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.type = "password";
+        });
+    }
+
+    // Google API Key
+    const googleKeyVisible = this.plugin.settings.provider === "google";
+    if (googleKeyVisible) {
+      new Setting(containerEl)
+        .setName("Google API Key")
+        .setDesc("Your Google AI API key for Gemini. Set GOOGLE_API_KEY environment variable to override.")
+        .addText((text: TextComponent) => {
+          text
+            .setPlaceholder("AIza...")
+            .setValue(this.plugin.settings.googleApiKey)
+            .onChange(async (value: string) => {
+              this.plugin.settings.googleApiKey = value.trim();
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.type = "password";
+        });
+    }
+
+    // Show current provider's models
+    const currentConfig = PROVIDER_CONFIGS[this.plugin.settings.provider];
+    const modelInfoEl = containerEl.createEl("div");
+    modelInfoEl.addClass("setting-item-description");
+    modelInfoEl.style.marginBottom = "1em";
+    modelInfoEl.style.padding = "0.5em";
+    modelInfoEl.style.backgroundColor = "var(--background-secondary)";
+    modelInfoEl.style.borderRadius = "4px";
+    modelInfoEl.innerHTML = `
+      <strong>${currentConfig.name} Models:</strong><br>
+      • Fast: ${currentConfig.models.fast}<br>
+      • Balanced: ${currentConfig.models.balanced}<br>
+      • Quality: ${currentConfig.models.quality}
+    `;
+
+    // ============================================================================
+    // APPEARANCE SETTINGS
+    // ============================================================================
+    containerEl.createEl("h3", { text: "Appearance" });
 
     const colorSchemeDropdownSetting = new Setting(containerEl)
       .setName("Highlight Color Scheme")
@@ -6700,6 +7714,88 @@ class WritersRoomSettingTab extends PluginSettingTab {
     });
     (audibleFeedbackSetting as any).controlEl.appendChild(audibleToggle);
 
+    // ============================================================================
+    // AGENTIC WORKFLOW SETTINGS
+    // ============================================================================
+    containerEl.createEl("h3", { text: "Cost & Performance" });
+
+    // Agentic Mode
+    const agenticModeSetting = new Setting(containerEl)
+      .setName("Workflow Mode")
+      .setDesc(
+        "Parallel: fastest & cheapest, runs agents simultaneously. Sequential: agents build on each other. Single-shot: legacy expensive mode with gpt-5."
+      );
+
+    const modeDropdown = document.createElement("select");
+    modeDropdown.classList.add("dropdown");
+    modeDropdown.style.width = "100%";
+
+    const modes: Array<{ value: AgenticMode; label: string; cost: string }> = [
+      { value: "parallel", label: "Parallel (Recommended)", cost: "~$0.02-0.10/run" },
+      { value: "sequential", label: "Sequential", cost: "~$0.03-0.15/run" },
+      { value: "single-shot", label: "Single-shot (Legacy)", cost: "~$0.50-2.00/run" }
+    ];
+
+    modes.forEach(({ value, label, cost }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = `${label} — ${cost}`;
+      if (value === this.plugin.settings.agenticMode) {
+        option.selected = true;
+      }
+      modeDropdown.appendChild(option);
+    });
+
+    modeDropdown.addEventListener("change", async () => {
+      this.plugin.settings.agenticMode = modeDropdown.value as AgenticMode;
+      await this.plugin.saveSettings();
+    });
+
+    (agenticModeSetting as any).controlEl.appendChild(modeDropdown);
+
+    // Model Tier
+    const modelTierSetting = new Setting(containerEl)
+      .setName("Model Quality")
+      .setDesc(
+        "Fast: cheapest, good for quick passes. Balanced: recommended for most use. Quality: best results, higher cost."
+      );
+
+    const tierDropdown = document.createElement("select");
+    tierDropdown.classList.add("dropdown");
+    tierDropdown.style.width = "100%";
+
+    const tiers: Array<{ value: ModelTier; label: string; model: string }> = [
+      { value: "fast", label: "Fast (gpt-4.1-nano)", model: "~$0.10/M tokens" },
+      { value: "balanced", label: "Balanced (gpt-4.1-mini)", model: "~$0.40/M tokens" },
+      { value: "quality", label: "Quality (gpt-4.1)", model: "~$2/M tokens" }
+    ];
+
+    tiers.forEach(({ value, label, model }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = `${label} — ${model}`;
+      if (value === this.plugin.settings.modelTier) {
+        option.selected = true;
+      }
+      tierDropdown.appendChild(option);
+    });
+
+    tierDropdown.addEventListener("change", async () => {
+      this.plugin.settings.modelTier = tierDropdown.value as ModelTier;
+      await this.plugin.saveSettings();
+    });
+
+    (modelTierSetting as any).controlEl.appendChild(tierDropdown);
+
+    // Cost estimate display
+    const costEstimate = containerEl.createEl("div");
+    costEstimate.addClass("setting-item-description");
+    costEstimate.setText(this.getCostEstimate());
+    costEstimate.style.marginBottom = "1em";
+    costEstimate.style.padding = "0.5em";
+    costEstimate.style.backgroundColor = "var(--background-secondary)";
+    costEstimate.style.borderRadius = "4px";
+
     new Setting(containerEl)
       .setName("Load demo data")
       .setDesc("Create sample story and edits in your vault for testing.")
@@ -6710,5 +7806,67 @@ class WritersRoomSettingTab extends PluginSettingTab {
           await this.plugin.loadTestFixtures();
         });
       });
+  }
+
+  private getCostEstimate(): string {
+    const { agenticMode, modelTier, provider } = this.plugin.settings;
+    
+    // Rough cost estimates per 1000-word document with 3 agents
+    // These vary by provider
+    const providerEstimates: Record<LLMProvider, Record<AgenticMode, Record<ModelTier, string>>> = {
+      openai: {
+        "parallel": {
+          "fast": "💰 ~$0.01-0.03 per 1000 words (cheapest)",
+          "balanced": "💰 ~$0.02-0.08 per 1000 words (recommended)",
+          "quality": "💰 ~$0.10-0.30 per 1000 words"
+        },
+        "sequential": {
+          "fast": "💰 ~$0.02-0.05 per 1000 words",
+          "balanced": "💰 ~$0.05-0.15 per 1000 words",
+          "quality": "💰 ~$0.15-0.40 per 1000 words"
+        },
+        "single-shot": {
+          "fast": "💰 ~$0.30-0.80 per 1000 words (uses quality model)",
+          "balanced": "💰 ~$0.30-0.80 per 1000 words (uses quality model)",
+          "quality": "💰 ~$0.30-0.80 per 1000 words"
+        }
+      },
+      anthropic: {
+        "parallel": {
+          "fast": "💰 ~$0.01-0.02 per 1000 words (Haiku)",
+          "balanced": "💰 ~$0.05-0.15 per 1000 words (Sonnet)",
+          "quality": "💰 ~$0.05-0.15 per 1000 words (Sonnet)"
+        },
+        "sequential": {
+          "fast": "💰 ~$0.02-0.04 per 1000 words",
+          "balanced": "💰 ~$0.08-0.20 per 1000 words",
+          "quality": "💰 ~$0.08-0.20 per 1000 words"
+        },
+        "single-shot": {
+          "fast": "💰 ~$0.05-0.15 per 1000 words",
+          "balanced": "💰 ~$0.05-0.15 per 1000 words",
+          "quality": "💰 ~$0.05-0.15 per 1000 words"
+        }
+      },
+      google: {
+        "parallel": {
+          "fast": "💰 ~$0.005-0.02 per 1000 words (Flash Lite - very cheap!)",
+          "balanced": "💰 ~$0.01-0.05 per 1000 words (Flash)",
+          "quality": "💰 ~$0.10-0.30 per 1000 words (Pro)"
+        },
+        "sequential": {
+          "fast": "💰 ~$0.01-0.03 per 1000 words",
+          "balanced": "💰 ~$0.02-0.08 per 1000 words",
+          "quality": "💰 ~$0.15-0.40 per 1000 words"
+        },
+        "single-shot": {
+          "fast": "💰 ~$0.10-0.30 per 1000 words",
+          "balanced": "💰 ~$0.10-0.30 per 1000 words",
+          "quality": "💰 ~$0.10-0.30 per 1000 words"
+        }
+      }
+    };
+
+    return providerEstimates[provider]?.[agenticMode]?.[modelTier] ?? "Cost estimate unavailable";
   }
 }
