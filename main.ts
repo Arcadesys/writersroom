@@ -1646,25 +1646,30 @@ export default class WritersRoomPlugin extends Plugin {
     }
   }
 
-  private async promptForAgentSelection(): Promise<string[] | null> {
+  private async promptForAgentSelection(wordCount: number): Promise<AgentSelectionResult | null> {
     if (this.agentPrompts.length === 0) {
       return null;
     }
 
     const initial = this.resolveAgentIds(this.lastAgentSelection ?? this.settings.defaultAgentIds);
 
-    return new Promise<string[] | null>((resolve) => {
+    return new Promise<AgentSelectionResult | null>((resolve) => {
       const modal = new WritersRoomAgentPickerModal(
         this.app,
+        this,
         this.agentPrompts,
         initial,
-        (choice) => {
-          if (!choice || choice.length === 0) {
+        wordCount,
+        (result) => {
+          if (!result || result.agentIds.length === 0) {
             resolve(null);
             return;
           }
-          const normalized = this.resolveAgentIds(choice);
-          resolve(normalized.length > 0 ? normalized : null);
+          const normalized = this.resolveAgentIds(result.agentIds);
+          resolve({
+            agentIds: normalized.length > 0 ? normalized : [],
+            modelTier: result.modelTier
+          });
         }
       );
       modal.open();
@@ -3298,6 +3303,13 @@ export default class WritersRoomPlugin extends Plugin {
     // Small delay to allow DOM to update after refresh
     if (typeof window !== "undefined" && origin === "sidebar") {
       await new Promise(resolve => window.setTimeout(resolve, 50));
+    }
+
+    // Ensure sidebar scrolls to selection after DOM update when clicking from editor
+    if (origin === "highlight") {
+      setTimeout(() => {
+        view.scrollToSelection(anchorId);
+      }, 50);
     }
 
     const shouldScroll = origin !== "highlight";
@@ -5268,16 +5280,23 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
     }
 
     let activeAgentIds: string[];
+    let selectedModelTier: ModelTier = this.settings.modelTier;
+    
     if (this.agentPrompts.length === 1) {
       activeAgentIds = [this.agentPrompts[0].id];
     } else {
-      const picked = await this.promptForAgentSelection();
+      const picked = await this.promptForAgentSelection(wordCount);
       if (!picked) {
         new Notice("Cancelled asking the Writers.");
         return;
       }
-      activeAgentIds = picked;
+      activeAgentIds = picked.agentIds;
+      selectedModelTier = picked.modelTier;
     }
+
+    // Temporarily override model tier for this request
+    const originalModelTier = this.settings.modelTier;
+    this.settings.modelTier = selectedModelTier;
 
     const agentDefinitions = this.resolveAgentDefinitions(activeAgentIds);
     if (agentDefinitions.length === 0) {
@@ -5392,6 +5411,9 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       
       new Notice(`Failed to fetch Writers Room edits: ${message}`);
     } finally {
+      // Restore original model tier
+      this.settings.modelTier = originalModelTier;
+      
       loadingNotice.hide();
       this.setRequestState(false);
       this.activeRunAgentIds = null;
@@ -6722,6 +6744,58 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
       .writersroom-quick-result-markdown {
         display: contents;
       }
+
+      /* Agent Picker Modal Styles */
+      .writersroom-agent-picker {
+        position: relative;
+      }
+
+      .writersroom-agent-picker-model-tier-container {
+        margin-bottom: 1rem;
+        padding-bottom: 0.75rem;
+        border-bottom: 1px solid var(--background-modifier-border);
+      }
+
+      .writersroom-agent-picker-model-tier-label {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 500;
+        margin-bottom: 0.5rem;
+      }
+
+      .writersroom-agent-picker-model-tier {
+        width: 100%;
+        padding: 0.4rem 0.6rem;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 4px;
+        background: var(--background-modifier-form-field);
+        color: var(--text-normal);
+        font-size: 0.9em;
+        cursor: pointer;
+      }
+
+      .writersroom-agent-picker-model-tier:hover {
+        border-color: var(--interactive-accent);
+      }
+
+      .writersroom-agent-picker-model-tier:focus {
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: 2px;
+      }
+
+      .writersroom-agent-picker-cost-estimate {
+        position: absolute;
+        bottom: 1rem;
+        right: 1rem;
+        color: #ffeb3b;
+        font-style: italic;
+        font-size: 0.85em;
+        padding: 0.4rem 0.6rem;
+        background: rgba(0, 0, 0, 0.3);
+        border-radius: 4px;
+        pointer-events: none;
+      }
     `;
 }
 
@@ -6847,6 +6921,7 @@ class WritersRoomAgentPickerModal extends ModalCtor {
           this.selected.delete(agent.id);
         }
         this.updateSubmitState();
+        this.updateCostEstimate();
       });
       this.checkboxes.set(agent.id, checkbox);
 
@@ -6861,6 +6936,7 @@ class WritersRoomAgentPickerModal extends ModalCtor {
           this.selected.delete(agent.id);
         }
         this.updateSubmitState();
+        this.updateCostEstimate();
       });
     }
 
@@ -6876,6 +6952,7 @@ class WritersRoomAgentPickerModal extends ModalCtor {
         }
       }
       this.updateSubmitState();
+      this.updateCostEstimate();
     });
     const clearBtn = bulkActions.createEl("button", { text: "Clear" });
     clearBtn.addEventListener("click", () => {
@@ -6884,6 +6961,7 @@ class WritersRoomAgentPickerModal extends ModalCtor {
         checkbox.checked = false;
       }
       this.updateSubmitState();
+      this.updateCostEstimate();
     });
 
     const actionGroup = toolbar.createDiv({ cls: "writersroom-agent-picker-actions" });
@@ -6930,13 +7008,89 @@ class WritersRoomAgentPickerModal extends ModalCtor {
     }
     this.submitted = true;
     this.close();
-    this.onComplete(Array.from(this.selected));
+    this.onComplete({
+      agentIds: Array.from(this.selected),
+      modelTier: this.selectedModelTier
+    });
   }
 
   private updateSubmitState(): void {
     if (this.submitButton) {
       this.submitButton.disabled = this.selected.size === 0;
     }
+  }
+
+  private updateCostEstimate(): void {
+    if (!this.costEstimateEl) return;
+
+    const cost = this.calculateCostEstimate(
+      this.wordCount,
+      this.selectedModelTier,
+      this.selected.size
+    );
+
+    this.costEstimateEl.textContent = cost;
+  }
+
+  private calculateCostEstimate(wordCount: number, modelTier: ModelTier, agentCount: number): string {
+    if (wordCount === 0) {
+      return "*Estimated cost: $0.00*";
+    }
+
+    const { agenticMode, provider } = this.plugin.settings;
+    
+    // Convert words to approximate tokens (roughly 750 words = 1000 tokens)
+    const tokenCount = (wordCount / 750) * 1000;
+    
+    // Base cost per 1000 tokens for each tier and provider (approximate)
+    // These are rough estimates based on typical API pricing
+    const costPer1kTokens: Record<LLMProvider, Record<ModelTier, { input: number; output: number }>> = {
+      openai: {
+        fast: { input: 0.10, output: 0.30 },
+        balanced: { input: 0.40, output: 1.20 },
+        quality: { input: 2.00, output: 6.00 }
+      },
+      anthropic: {
+        fast: { input: 0.25, output: 1.25 },
+        balanced: { input: 3.00, output: 15.00 },
+        quality: { input: 3.00, output: 15.00 }
+      },
+      google: {
+        fast: { input: 0.075, output: 0.30 },
+        balanced: { input: 0.125, output: 0.50 },
+        quality: { input: 1.25, output: 5.00 }
+      }
+    };
+
+    const costs = costPer1kTokens[provider]?.[modelTier];
+    if (!costs) {
+      return "*Estimated cost: unavailable*";
+    }
+
+    // Estimate input/output token ratio (roughly 70% input, 30% output for typical edits)
+    const inputTokens = tokenCount * 0.7;
+    const outputTokens = tokenCount * 0.3;
+
+    // Calculate cost per agent
+    let costPerAgent = (inputTokens / 1000) * costs.input + (outputTokens / 1000) * costs.output;
+
+    // Adjust for agentic mode
+    if (agenticMode === "sequential") {
+      // Sequential: each agent processes the output of previous, so costs compound slightly
+      costPerAgent *= 1.2;
+    } else if (agenticMode === "single-shot") {
+      // Single-shot uses quality model regardless of tier
+      const qualityCosts = costPer1kTokens[provider]?.quality || costs;
+      costPerAgent = (inputTokens / 1000) * qualityCosts.input + (outputTokens / 1000) * qualityCosts.output;
+    }
+
+    // Total cost = cost per agent * number of agents
+    const totalCost = costPerAgent * Math.max(1, agentCount);
+
+    // Format to 2 decimal places
+    const formattedCost = totalCost < 0.01 ? "< $0.01" : `~$${totalCost.toFixed(2)}`;
+
+    return `*Estimated cost: ${formattedCost}*`;
   }
 }
 
@@ -7246,6 +7400,9 @@ class WritersRoomSidebarView extends ItemView {
   updateSelection(anchorId: string | null): void {
     this.state.selectedAnchorId = anchorId ?? null;
     this.applySelection();
+    if (anchorId) {
+      this.scrollToSelection(anchorId);
+    }
   }
 
   private render(): void {
@@ -7658,8 +7815,33 @@ class WritersRoomSidebarView extends ItemView {
 
     if (activeItem) {
       activeItem.classList.add("is-selected");
-      activeItem.scrollIntoView({ block: "nearest" });
+      activeItem.scrollIntoView({ 
+        block: "center", 
+        behavior: "smooth",
+        inline: "nearest"
+      });
     }
+  }
+
+  scrollToSelection(anchorId: string): void {
+    if (!anchorId) {
+      return;
+    }
+    
+    // Use requestAnimationFrame to ensure DOM is updated
+    requestAnimationFrame(() => {
+      const activeItem = this.containerEl.querySelector<HTMLElement>(
+        `.writersroom-sidebar-item[data-anchor-id="${anchorId}"]`
+      );
+      
+      if (activeItem) {
+        activeItem.scrollIntoView({ 
+          block: "center", 
+          behavior: "smooth",
+          inline: "nearest"
+        });
+      }
+    });
   }
 
   private applyRequestState(): void {
