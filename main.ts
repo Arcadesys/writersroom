@@ -4233,7 +4233,7 @@ ${charterSections}
 - Work line by line; blank lines are untouchable.
 - Offer only the smallest necessary adjustments aligned with each active agent's charter.
 - Maintain continuity for voice, tense, POV, timeline, and factual details.
-- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing in the piece.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
 - Validate every revision to ensure it delivers the intended improvement; self-correct if it does not.
 
 ### STRUCTURED RESPONSE
@@ -4271,7 +4271,7 @@ Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will pe
 ### EDITING RULES
 - Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
 - Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
-- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing in the piece.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
 - After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
 - Categorize each edit by one of the following:
   1. **flow** — smoothness and clarity of sentences
@@ -4287,7 +4287,7 @@ FIELD GUIDELINES
 - \`type\`:
   - "addition": only provide newly inserted text
   - "replacement": rewrite the existing snippet in full with the improved phrasing
-  - "star": mark exemplary text worth celebrating
+  - "star": mark text that works well (from your perspective as a trusted editing partner)
   - "subtraction": output must be null (for removed text)
   - "annotation": no text is added or deleted; output is a brief bracketed comment or suggestion
 - \`category\`: one of "flow", "rhythm", "sensory", or "punch"
@@ -4295,7 +4295,7 @@ FIELD GUIDELINES
 - \`output\`:
   - If type = "addition": only the text being inserted
   - If type = "replacement": the revised text that should replace the original snippet
-  - If type = "star": a concise note explaining why the passage shines (optional if the highlight speaks for itself)
+  - If type = "star": a brief note explaining why this passage works well (optional if the highlight speaks for itself)
   - If type = "subtraction": must be null
   - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
 
@@ -4342,7 +4342,7 @@ ${agent.content.trim()}
 ### EDITING RULES
 - Work line by line; blank lines are untouchable.
 - Suggest only the *smallest necessary* changes aligned with your specialty.
-- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing aligned with your specialty.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
 - Be selective: only flag lines that genuinely need your expertise.
 
 ### RESPONSE FORMAT
@@ -4859,11 +4859,16 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
         // If only stars, keep the first one
         mergedEdits.push(stars[0]);
       } else if (annotations.length > 0) {
-        // Combine all annotations
-        const combined = annotations[0];
-        if (annotations.length > 1) {
-          combined.output = annotations.map(a => a.output).filter(Boolean).join(" | ");
-        }
+        // Combine all annotations into one
+        const combinedAnnotationText = annotations
+          .map(a => a.output)
+          .filter(Boolean)
+          .join(" | ");
+        
+        const combined = {
+          ...annotations[0],
+          output: combinedAnnotationText || null
+        };
         mergedEdits.push(combined);
       }
     }
@@ -6231,6 +6236,10 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
       }
 
       .writersroom-sidebar-header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background-color: var(--background-primary);
         padding: 0.75rem 0.9rem 0.5rem;
         border-bottom: 1px solid var(--divider-color);
       }
@@ -6272,6 +6281,9 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         font-size: 0.85em;
         color: var(--text-muted);
         white-space: pre-wrap;
+        max-height: 8rem;
+        overflow-y: auto;
+        margin-top: 0.5rem;
       }
 
       .writersroom-token-wrapper {
@@ -7605,7 +7617,7 @@ class WritersRoomSidebarView extends ItemView {
             // Show placeholder for stars without comment text
             contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
-              text: "⭐ (Exemplary passage - no additional comment)"
+              text: "⭐ (Effective passage - no additional comment)"
             });
           }
         } else {

@@ -219,8 +219,21 @@ function combineEditsOnSameLine(edits: EditEntry[]): EditEntry[] {
         annotation: annotationText || null
       });
     } else {
-      // Only annotations on this line, keep them (or just the first if multiple)
-      combined.push(annotations[0]);
+      // Only annotations on this line, combine them all
+      if (annotations.length === 1) {
+        combined.push(annotations[0]);
+      } else {
+        // Combine multiple annotations into one
+        const combinedAnnotationText = annotations
+          .map(a => a.output || "")
+          .filter(text => text.length > 0)
+          .join(" ");
+        
+        combined.push({
+          ...annotations[0],
+          output: combinedAnnotationText || null
+        });
+      }
     }
   }
 
