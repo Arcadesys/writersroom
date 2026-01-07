@@ -1,7 +1,7 @@
 {
   "id": "writersroom",
   "name": "Writers Room",
-  "version": "2.0.0",
+  "version": "2.0.2",
   "minAppVersion": "1.5.0",
   "description": "AI-powered prose editor with agentic workflows and multi-provider LLM support.",
   "author": "Austen",

@@ -4233,7 +4233,7 @@ ${charterSections}
 - Work line by line; blank lines are untouchable.
 - Offer only the smallest necessary adjustments aligned with each active agent's charter.
 - Maintain continuity for voice, tense, POV, timeline, and factual details.
-- Use "star" edits to celebrate exemplary lines worth keeping.
+- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing in the piece.
 - Validate every revision to ensure it delivers the intended improvement; self-correct if it does not.
 
 ### STRUCTURED RESPONSE
@@ -4271,6 +4271,7 @@ Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will pe
 ### EDITING RULES
 - Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
 - Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
+- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing in the piece.
 - After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
 - Categorize each edit by one of the following:
   1. **flow** — smoothness and clarity of sentences
@@ -4341,7 +4342,7 @@ ${agent.content.trim()}
 ### EDITING RULES
 - Work line by line; blank lines are untouchable.
 - Suggest only the *smallest necessary* changes aligned with your specialty.
-- Use "star" edits to celebrate exemplary lines worth keeping.
+- Always include at least one "star" edit to celebrate an exemplary passage worth keeping. Choose the line that best exemplifies strong writing aligned with your specialty.
 - Be selective: only flag lines that genuinely need your expertise.
 
 ### RESPONSE FORMAT
