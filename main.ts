@@ -6421,11 +6421,68 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         text-transform: capitalize;
       }
 
+      .writersroom-sidebar-item-reason {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        margin-bottom: 0.5rem;
+        padding: 0.4rem 0.5rem;
+        background: var(--background-modifier-form-field);
+        border-radius: 4px;
+        font-size: 0.8em;
+        flex-wrap: wrap;
+      }
+
+      .writersroom-sidebar-item-reason-label {
+        font-weight: 600;
+        color: var(--text-normal);
+      }
+
+      .writersroom-sidebar-item-reason-category {
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        padding: 0.15rem 0.4rem;
+        border-radius: 3px;
+        font-weight: 500;
+        text-transform: capitalize;
+        font-size: 0.85em;
+      }
+
+      .writersroom-sidebar-item-reason-separator {
+        color: var(--text-muted);
+        margin: 0 0.2rem;
+      }
+
+      .writersroom-sidebar-item-reason-annotation {
+        color: var(--text-normal);
+        font-style: italic;
+        flex: 1;
+        min-width: 0;
+      }
+
+      .writersroom-sidebar-item-label {
+        font-size: 0.75em;
+        font-weight: 600;
+        color: var(--text-muted);
+        margin-top: 0.5rem;
+        margin-bottom: 0.25rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+      }
+
+      .writersroom-sidebar-item-label:first-of-type {
+        margin-top: 0;
+      }
+
       .writersroom-sidebar-item-original {
         font-size: 0.8em;
         color: var(--text-muted);
         white-space: pre-wrap;
         margin-bottom: 0.35rem;
+        padding: 0.4rem 0.5rem;
+        background: var(--background-modifier-form-field);
+        border-radius: 4px;
+        border-left: 2px solid var(--text-muted);
       }
 
       .writersroom-sidebar-item-snippet {
@@ -6438,6 +6495,10 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
       .writersroom-sidebar-item-output {
         font-weight: 500;
         color: var(--text-normal);
+        padding: 0.4rem 0.5rem;
+        background: var(--background-modifier-form-field);
+        border-radius: 4px;
+        border-left: 2px solid var(--interactive-accent);
       }
 
       .writersroom-sidebar-annotation-text {
@@ -6543,16 +6604,27 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         font-size: 0.75em;
         font-weight: 500;
         cursor: pointer;
-        transition: opacity 0.2s ease;
+        transition: opacity 0.2s ease, transform 0.1s ease;
       }
 
       .writersroom-sidebar-action-btn:hover:not(:disabled) {
         opacity: 0.85;
+        transform: translateY(-1px);
       }
 
       .writersroom-sidebar-action-btn:disabled {
         opacity: 0.55;
         cursor: default;
+      }
+
+      .writersroom-sidebar-action-btn.writersroom-action-accept {
+        background: var(--interactive-success, #2ecc71);
+        font-weight: 600;
+      }
+
+      .writersroom-sidebar-action-btn.writersroom-action-deny {
+        background: var(--color-red, #e74c3c);
+        font-weight: 600;
       }
 
       .writersroom-sidebar-empty {
@@ -7261,15 +7333,28 @@ class WritersRoomSidebarView extends ItemView {
         });
       } else {
         // Full expanded view
-        contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-meta",
-          text: `Category: ${edit.category}`
-        });
-
         const outputText = typeof edit.output === "string" ? edit.output : null;
+
+        // Show "Why" - Category prominently at the top
+        const reasonEl = contentEl.createEl("div", {
+          cls: "writersroom-sidebar-item-reason"
+        });
+        reasonEl.createEl("span", {
+          cls: "writersroom-sidebar-item-reason-label",
+          text: "Why:"
+        });
+        reasonEl.createEl("span", {
+          cls: "writersroom-sidebar-item-reason-category",
+          text: edit.category
+        });
+        // Note: Detailed annotation is shown in the annotation box below, not here to avoid duplication
 
         if (edit.type === "annotation") {
           // For annotations, show the original text as context
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-label",
+            text: "Original text:"
+          });
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
             text: previewText(edit.original_text)
@@ -7288,6 +7373,11 @@ class WritersRoomSidebarView extends ItemView {
             });
           }
         } else if (edit.type === "star") {
+          // Stars: show original text and star comment
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-label",
+            text: "Starred text:"
+          });
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
             text: previewText(edit.original_text)
@@ -7307,7 +7397,12 @@ class WritersRoomSidebarView extends ItemView {
             });
           }
         } else {
-          // For additions, replacements, and subtractions, show original snippet
+          // For additions, replacements, and subtractions
+          // Show original text with label
+          contentEl.createEl("div", {
+            cls: "writersroom-sidebar-item-label",
+            text: "Original text:"
+          });
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
             text: previewText(edit.original_text)
@@ -7328,11 +7423,27 @@ class WritersRoomSidebarView extends ItemView {
           }
           
           // Show the suggested revision if available
-          if (outputText) {
+          if (outputText || edit.type === "subtraction") {
+            const editLabel = edit.type === "subtraction" 
+              ? "Edit: Remove this text" 
+              : edit.type === "addition"
+              ? "Edit: Add this text"
+              : "Suggested change:";
             contentEl.createEl("div", {
-              cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
-              text: previewText(outputText)
+              cls: "writersroom-sidebar-item-label",
+              text: editLabel
             });
+            if (outputText) {
+              contentEl.createEl("div", {
+                cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
+                text: previewText(outputText)
+              });
+            } else if (edit.type === "subtraction") {
+              contentEl.createEl("div", {
+                cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
+                text: "(Text will be removed)"
+              });
+            }
           }
         }
 
@@ -7346,27 +7457,32 @@ class WritersRoomSidebarView extends ItemView {
               typeof edit.output === "string" &&
               edit.output.length > 0);
 
+          // Quick Accept/Deny buttons for applicable edits
           if (canApply) {
             actions.push({
-              label: "Apply",
-              title: "Apply this suggestion to the note",
+              label: "✓ Accept",
+              title: "Accept and apply this edit",
               onClick: () =>
                 this.plugin.applySidebarEdit(sourcePath, anchorId)
             });
           }
 
+          // Deny button (always available, except for stars which are just informational)
+          if (edit.type !== "star") {
+            actions.push({
+              label: "✗ Deny",
+              title: "Reject and remove this edit",
+              onClick: () =>
+                this.plugin.resolveSidebarEdit(sourcePath, anchorId)
+            });
+          }
+
+          // Secondary actions
           actions.push({
             label: "Jump to",
             title: "Scroll note to this edit",
             onClick: () =>
               this.plugin.jumpToAnchor(sourcePath, anchorId)
-          });
-
-          actions.push({
-            label: "Resolve",
-            title: "Remove this edit from the list",
-            onClick: () =>
-              this.plugin.resolveSidebarEdit(sourcePath, anchorId)
           });
         }
 
@@ -7439,6 +7555,13 @@ class WritersRoomSidebarView extends ItemView {
         cls: "writersroom-sidebar-action-btn",
         text: action.label
       });
+
+      // Add specific classes for Accept/Deny buttons
+      if (action.label.includes("Accept")) {
+        buttonEl.addClass("writersroom-action-accept");
+      } else if (action.label.includes("Deny")) {
+        buttonEl.addClass("writersroom-action-deny");
+      }
 
       if (action.title) {
         buttonEl.setAttribute("title", action.title);
