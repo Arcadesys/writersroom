@@ -6743,24 +6743,39 @@ const ModalCtor: typeof Modal =
         close(): void {}
       } as unknown as typeof Modal);
 
+interface AgentSelectionResult {
+  agentIds: string[];
+  modelTier: ModelTier;
+}
+
 class WritersRoomAgentPickerModal extends ModalCtor {
   declare scope: { register: (modifiers: string[], key: string, handler: () => boolean | void) => void };
   private agents: AgentPromptDefinition[];
   private selected: Set<string>;
-  private onComplete: (selection: string[] | null) => void;
+  private onComplete: (result: AgentSelectionResult | null) => void;
   private submitted = false;
   private checkboxes = new Map<string, HTMLInputElement>();
   private submitButton: HTMLButtonElement | null = null;
+  private plugin: WritersRoomPlugin;
+  private wordCount: number;
+  private selectedModelTier: ModelTier;
+  private costEstimateEl: HTMLElement | null = null;
+  private modelTierDropdown: HTMLSelectElement | null = null;
 
   constructor(
     app: App,
+    plugin: WritersRoomPlugin,
     agents: AgentPromptDefinition[],
     initialSelection: string[],
-    onComplete: (selection: string[] | null) => void
+    wordCount: number,
+    onComplete: (result: AgentSelectionResult | null) => void
   ) {
     super(app);
+    this.plugin = plugin;
     this.agents = agents;
     this.selected = new Set(initialSelection);
+    this.wordCount = wordCount;
+    this.selectedModelTier = plugin.settings.modelTier;
     this.onComplete = onComplete;
   }
 
@@ -6773,6 +6788,40 @@ class WritersRoomAgentPickerModal extends ModalCtor {
     contentEl.createEl("p", {
       text: "Select the specialists you want to run for this pass."
     });
+
+    // Model tier selection
+    const modelTierContainer = contentEl.createDiv({ cls: "writersroom-agent-picker-model-tier-container" });
+    const modelTierLabel = modelTierContainer.createEl("label", {
+      text: "Model Quality:",
+      cls: "writersroom-agent-picker-model-tier-label"
+    });
+    const modelTierDropdown = document.createElement("select");
+    modelTierDropdown.classList.add("writersroom-agent-picker-model-tier");
+    this.modelTierDropdown = modelTierDropdown;
+
+    const providerModels = PROVIDER_CONFIGS[this.plugin.settings.provider].models;
+    const tiers: Array<{ value: ModelTier; label: string }> = [
+      { value: "fast", label: `Fast (${providerModels.fast})` },
+      { value: "balanced", label: `Balanced (${providerModels.balanced})` },
+      { value: "quality", label: `Quality (${providerModels.quality})` }
+    ];
+
+    tiers.forEach(({ value, label }) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = label;
+      if (value === this.selectedModelTier) {
+        option.selected = true;
+      }
+      modelTierDropdown.appendChild(option);
+    });
+
+    modelTierDropdown.addEventListener("change", () => {
+      this.selectedModelTier = modelTierDropdown.value as ModelTier;
+      this.updateCostEstimate();
+    });
+
+    modelTierLabel.appendChild(modelTierDropdown);
 
     const list = contentEl.createDiv({ cls: "writersroom-agent-picker-list" });
 
@@ -6848,6 +6897,11 @@ class WritersRoomAgentPickerModal extends ModalCtor {
       cls: "mod-cta"
     });
     this.submitButton.addEventListener("click", () => this.submit());
+
+    // Cost estimate display (positioned in bottom right)
+    const costEstimateEl = contentEl.createDiv({ cls: "writersroom-agent-picker-cost-estimate" });
+    this.costEstimateEl = costEstimateEl;
+    this.updateCostEstimate();
 
     this.updateSubmitState();
 
