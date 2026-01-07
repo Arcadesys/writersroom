@@ -4233,7 +4233,7 @@ ${charterSections}
 - Work line by line; blank lines are untouchable.
 - Offer only the smallest necessary adjustments aligned with each active agent's charter.
 - Maintain continuity for voice, tense, POV, timeline, and factual details.
-- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working. For star edits, always provide encouraging commentary in the output field explaining why the passage works well - writers benefit from understanding what's effective in their work.
 - Validate every revision to ensure it delivers the intended improvement; self-correct if it does not.
 
 ### STRUCTURED RESPONSE
@@ -4271,7 +4271,7 @@ Begin with a concise checklist (3-7 bullets) outlining the sub-tasks you will pe
 ### EDITING RULES
 - Examine the input text line by line; each line should be treated as a distinct editing unit—even if it contains multiple sentences or is blank. Do not edit blank lines.
 - Suggest only the *smallest possible* changes needed to improve rhythm, pacing, vividness, or flow.
-- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working. For star edits, always provide encouraging commentary in the output field explaining why the passage works well - writers benefit from understanding what's effective in their work.
 - After making edits, validate that each change enhances the intended aspect (flow, rhythm, sensory, or punch) in 1-2 lines and be ready to self-correct if the validation fails.
 - Categorize each edit by one of the following:
   1. **flow** — smoothness and clarity of sentences
@@ -4295,7 +4295,7 @@ FIELD GUIDELINES
 - \`output\`:
   - If type = "addition": only the text being inserted
   - If type = "replacement": the revised text that should replace the original snippet
-  - If type = "star": a brief note explaining why this passage works well (optional if the highlight speaks for itself)
+  - If type = "star": a brief, encouraging note explaining why this passage works well (always provide commentary - writers benefit from understanding what's effective)
   - If type = "subtraction": must be null
   - If type = "annotation": a succinct bracketed comment, e.g., [RHYTHM: try varying sentence length.]
 
@@ -4342,7 +4342,7 @@ ${agent.content.trim()}
 ### EDITING RULES
 - Work line by line; blank lines are untouchable.
 - Suggest only the *smallest necessary* changes aligned with your specialty.
-- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working.
+- Always include at least one "star" edit to highlight a passage that works well. As a long-time editing partner, point out lines where the writing is effective, even if it's not perfect. This helps the writer understand what's working. For star edits, always provide encouraging commentary in the output field explaining why the passage works well - writers benefit from understanding what's effective in their work.
 - Be selective: only flag lines that genuinely need your expertise.
 
 ### RESPONSE FORMAT
@@ -6236,10 +6236,6 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
       }
 
       .writersroom-sidebar-header {
-        position: sticky;
-        top: 0;
-        z-index: 10;
-        background-color: var(--background-primary);
         padding: 0.75rem 0.9rem 0.5rem;
         border-bottom: 1px solid var(--divider-color);
       }
@@ -6281,9 +6277,33 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         font-size: 0.85em;
         color: var(--text-muted);
         white-space: pre-wrap;
-        max-height: 8rem;
-        overflow-y: auto;
         margin-top: 0.5rem;
+      }
+
+      .writersroom-sidebar-summary-details {
+        margin-top: 0.5rem;
+      }
+
+      .writersroom-sidebar-summary-details summary {
+        cursor: pointer;
+        user-select: none;
+        font-size: 0.85em;
+        color: var(--text-muted);
+        padding: 0.25rem 0;
+      }
+
+      .writersroom-sidebar-summary-details summary:hover {
+        color: var(--text-normal);
+      }
+
+      .writersroom-sidebar-summary-details[open] summary {
+        margin-bottom: 0.5rem;
+      }
+
+      .writersroom-sidebar-summary-content {
+        font-size: 0.85em;
+        color: var(--text-muted);
+        white-space: pre-wrap;
       }
 
       .writersroom-token-wrapper {
@@ -7459,8 +7479,14 @@ class WritersRoomSidebarView extends ItemView {
     this.applyRequestState();
 
     if (this.state.payload?.summary) {
-      header.createEl("div", {
-        cls: "writersroom-sidebar-summary",
+      const summaryDetails = header.createEl("details", {
+        cls: "writersroom-sidebar-summary-details"
+      });
+      summaryDetails.createEl("summary", {
+        text: "Summary (click to expand)"
+      });
+      summaryDetails.createEl("div", {
+        cls: "writersroom-sidebar-summary-content",
         text: this.state.payload.summary
       });
     }
@@ -7609,6 +7635,11 @@ class WritersRoomSidebarView extends ItemView {
 
           // Show star comments in full (never truncate editorial praise)
           if (outputText) {
+            // Add a label to make the commentary more prominent
+            contentEl.createEl("div", {
+              cls: "writersroom-sidebar-item-label",
+              text: "Commentary:"
+            });
             const formattedStar = this.formatAnnotationText(outputText);
             formattedStar.addClass("writersroom-sidebar-item-snippet");
             formattedStar.addClass("writersroom-sidebar-star-text");
