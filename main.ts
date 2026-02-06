@@ -421,6 +421,8 @@ type ColorScheme = "default" | "high-contrast" | "colorblind-friendly" | "muted"
 const DEFAULT_AGENT_PROMPT_FOLDER = "WritersRoom Agents";
 const DEFAULT_AGENT_IDS = ["flow", "lens", "punch"] as const;
 const LARGE_FILE_WARNING_THRESHOLD_WORDS = 4000;
+/** Virtual source path for "Ask the Writers" with pasted content (no real file). */
+const PASTED_CONTENT_SOURCE_PATH = "WritersRoom/Pasted.md";
 
 // ============================================================================
 // MULTI-PROVIDER LLM SUPPORT
@@ -3304,9 +3306,11 @@ export default class WritersRoomPlugin extends Plugin {
     }
 
     const activeFile = this.app.workspace.getActiveFile();
+    const sourceFile = this.getFileByPath(sourcePath);
     if (
       origin === "sidebar" &&
       activeFile?.path !== sourcePath &&
+      sourceFile &&
       typeof this.app.workspace.openLinkText === "function"
     ) {
       await this.app.workspace.openLinkText(sourcePath, "", false);
@@ -3908,6 +3912,25 @@ export default class WritersRoomPlugin extends Plugin {
   private getFileByPath(path: string): TFile | null {
     const abstract = this.getVault().getAbstractFileByPath(path);
     return this.isTFile(abstract) ? abstract : null;
+  }
+
+  /**
+   * Returns the full document content for a source path, or null if the source
+   * is pasted content or the file cannot be read. Used by the sidebar inline-diff view.
+   */
+  async getDocumentContentForSource(sourcePath: string): Promise<string | null> {
+    if (sourcePath === PASTED_CONTENT_SOURCE_PATH) {
+      return null;
+    }
+    const file = this.getFileByPath(sourcePath);
+    if (!file) {
+      return null;
+    }
+    try {
+      return await this.getVault().read(file);
+    } catch {
+      return null;
+    }
   }
 
   private getActiveSelectionInfo(): { selection: string; sourcePath: string | null } | null {
@@ -5278,6 +5301,66 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
     file: TFile,
     origin: SelectionOrigin
   ): Promise<void> {
+    const editsPath = this.getEditsPathForSource(file.path);
+    if (!editsPath) {
+      new Notice("Could not determine where to store Writers Room edits for this note.");
+      return;
+    }
+    let noteContents: string;
+    try {
+      noteContents = await this.getVault().read(file);
+    } catch (error) {
+      this.logError("Failed to read note before requesting AI edits.", error);
+      new Notice("Failed to read the note contents. See console for details.");
+      return;
+    }
+    if (!noteContents.trim()) {
+      new Notice("The current note is empty. Add some content before asking the Writers.");
+      return;
+    }
+    const wordCount = noteContents.trim().split(/\s+/).length;
+    if (wordCount > LARGE_FILE_WARNING_THRESHOLD_WORDS) {
+      const proceed = await this.confirmLargeFileOperation(
+        wordCount,
+        `This note is quite long (${wordCount} words). Processing may take several minutes and could be slow. Continue?`
+      );
+      if (!proceed) {
+        new Notice("Cancelled asking the Writers.");
+        return;
+      }
+    }
+    await this.requestAiEditsWithContent(noteContents, file.path, origin);
+  }
+
+  /**
+   * Ask the Writers for edits using pasted text (no active file).
+   * Results are stored under a virtual source path and shown in the sidebar.
+   */
+  async requestAiEditsForPastedContent(content: string): Promise<void> {
+    const trimmed = content.trim();
+    if (!trimmed) {
+      new Notice("Paste some text in the box above before asking the Writers.");
+      return;
+    }
+    const wordCount = trimmed.split(/\s+/).length;
+    if (wordCount > LARGE_FILE_WARNING_THRESHOLD_WORDS) {
+      const proceed = await this.confirmLargeFileOperation(
+        wordCount,
+        `This text is quite long (${wordCount} words). Processing may take several minutes. Continue?`
+      );
+      if (!proceed) {
+        new Notice("Cancelled asking the Writers.");
+        return;
+      }
+    }
+    await this.requestAiEditsWithContent(trimmed, PASTED_CONTENT_SOURCE_PATH, "sidebar");
+  }
+
+  private async requestAiEditsWithContent(
+    noteContents: string,
+    sourcePath: string,
+    origin: SelectionOrigin
+  ): Promise<void> {
     if (this.requestInProgress) {
       new Notice("Already asking the Writers. Please wait.");
       return;
@@ -5289,18 +5372,9 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       return;
     }
 
-    const editsPath = this.getEditsPathForSource(file.path);
+    const editsPath = this.getEditsPathForSource(sourcePath);
     if (!editsPath) {
       new Notice("Could not determine where to store Writers Room edits for this note.");
-      return;
-    }
-
-    let noteContents: string;
-    try {
-      noteContents = await this.getVault().read(file);
-    } catch (error) {
-      this.logError("Failed to read note before requesting AI edits.", error);
-      new Notice("Failed to read the note contents. See console for details.");
       return;
     }
 
@@ -5309,7 +5383,6 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       return;
     }
 
-    // Check word count limit
     const wordCount = noteContents.trim().split(/\s+/).length;
     if (wordCount > LARGE_FILE_WARNING_THRESHOLD_WORDS) {
       const proceed = await this.confirmLargeFileOperation(
@@ -5329,7 +5402,7 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
 
     let activeAgentIds: string[];
     let selectedModelTier: ModelTier = this.settings.modelTier;
-    
+
     if (this.agentPrompts.length === 1) {
       activeAgentIds = [this.agentPrompts[0].id];
     } else {
@@ -5342,13 +5415,13 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       selectedModelTier = picked.modelTier;
     }
 
-    // Temporarily override model tier for this request
     const originalModelTier = this.settings.modelTier;
     this.settings.modelTier = selectedModelTier;
 
     const agentDefinitions = this.resolveAgentDefinitions(activeAgentIds);
     if (agentDefinitions.length === 0) {
       new Notice("Selected agents could not be loaded. Check your Writers Room agent prompts.");
+      this.settings.modelTier = originalModelTier;
       return;
     }
 
@@ -5356,20 +5429,21 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
     this.lastAgentSelection = [...activeAgentIds];
     const agentNames = agentDefinitions.map((agent) => agent.label).join(", ");
 
-    this.activeSourcePath = file.path;
+    this.activeSourcePath = sourcePath;
     this.activeAnchorId = null;
     this.activeEditIndex = null;
     this.activePayload = null;
 
-    const cleared = await this.clearOutstandingEditsBeforeRequest(file.path);
+    const cleared = await this.clearOutstandingEditsBeforeRequest(sourcePath);
     if (!cleared) {
+      this.settings.modelTier = originalModelTier;
       return;
     }
 
     this.resetRequestProgress();
 
     await this.ensureSidebar({
-      sourcePath: file.path,
+      sourcePath,
       payload: null,
       selectedAnchorId: null
     });
@@ -5379,10 +5453,9 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       agentDefinitions.length === 1
         ? `${agentDefinitions[0].label} is reviewing your work. This can take up to five minutes…`
         : `The Writers (${agentNames}) are reviewing your work. This can take up to five minutes…`;
-    this.startRequestProgress(file.path, initialProgressLabel);
+    this.startRequestProgress(sourcePath, initialProgressLabel);
     const loadingNotice = new Notice("Asking the Writers…", 0);
 
-    // Play request start audicon for accessibility
     this.audiconPlayer?.play("request-start");
 
     try {
@@ -5390,17 +5463,14 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
 
       let payload: EditPayload;
 
-      // Choose workflow based on agentic mode setting
       if (this.settings.agenticMode === "single-shot") {
-        // Legacy mode: one big expensive call
         payload = await this.runSingleShotWorkflow(noteContents, activeAgentIds, apiKey);
       } else {
-        // Agentic mode: smaller, cheaper, parallel calls
         const lineCount = noteContents.split("\n").length;
         const useChunking = lineCount > this.settings.maxChunkLines;
 
         this.advanceRequestProgress(
-          useChunking 
+          useChunking
             ? `Processing ${Math.ceil(lineCount / this.settings.maxChunkLines)} sections with ${agentNames}...`
             : `Running ${agentNames} in ${this.settings.agenticMode} mode...`
         );
@@ -5419,13 +5489,13 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       await this.ensureFolder("edits");
       await this.writeFile(editsPath, JSON.stringify(payload, null, 2) + "\n");
 
-      await this.persistEditsForSource(file.path, payload, { editsPath });
-      this.editCachePromises.delete(file.path);
-      this.activeSourcePath = file.path;
+      await this.persistEditsForSource(sourcePath, payload, { editsPath });
+      this.editCachePromises.delete(sourcePath);
+      this.activeSourcePath = sourcePath;
       this.activePayload = payload;
 
       this.logInfo("Writers Room edits generated.", {
-        file: file.path,
+        file: sourcePath,
         edits: payload.edits.length
       });
 
@@ -5437,12 +5507,11 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
 
       this.completeRequestProgress(progressCompletionMessage);
 
-      // Play request complete audicon for accessibility
       this.audiconPlayer?.play("request-complete");
 
       if (editsCount > 0) {
         const firstAnchor = this.getAnchorForEdit(payload.edits[0], 0);
-        await this.selectEdit(file.path, firstAnchor, origin);
+        await this.selectEdit(sourcePath, firstAnchor, origin);
         new Notice(`Writers provided ${editsCount} edit${editsCount === 1 ? "" : "s"}.`);
       } else {
         await this.refreshSidebarForActiveFile();
@@ -5453,15 +5522,13 @@ If no edits needed, return: {"edits": [], "summary": "No ${agent.id} adjustments
       const message = error instanceof Error ? error.message : "Unknown error occurred.";
       const progressMessage = message.length > 160 ? `${message.slice(0, 157)}...` : message;
       this.failRequestProgress(`The Writers encountered an error: ${progressMessage}`);
-      
-      // Play request error audicon for accessibility
+
       this.audiconPlayer?.play("request-error");
-      
+
       new Notice(`Failed to fetch Writers Room edits: ${message}`);
     } finally {
-      // Restore original model tier
       this.settings.modelTier = originalModelTier;
-      
+
       loadingNotice.hide();
       this.setRequestState(false);
       this.activeRunAgentIds = null;
@@ -6289,6 +6356,12 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         gap: 0.5rem;
       }
 
+      .writersroom-sidebar-header-actions {
+        display: flex;
+        justify-content: flex-end;
+        margin-top: 0.35rem;
+      }
+
       .writersroom-sidebar-title {
         font-weight: 600;
         margin-bottom: 0;
@@ -6790,6 +6863,195 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
       .writersroom-sidebar-empty {
         padding: 1rem 0.9rem;
         color: var(--text-muted);
+      }
+
+      .writersroom-sidebar-view-mode {
+        display: flex;
+        gap: 0.25rem;
+        padding: 0.4rem 0.9rem 0.5rem;
+        border-bottom: 1px solid var(--background-modifier-border);
+      }
+
+      .writersroom-sidebar-view-mode-btn {
+        padding: 0.3rem 0.6rem;
+        font-size: 0.8em;
+        border-radius: 4px;
+        border: 1px solid var(--background-modifier-border);
+        background: var(--background-secondary-alt);
+        color: var(--text-muted);
+        cursor: pointer;
+      }
+
+      .writersroom-sidebar-view-mode-btn:hover {
+        color: var(--text-normal);
+        background: var(--background-modifier-hover);
+      }
+
+      .writersroom-sidebar-view-mode-btn.is-active {
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        border-color: var(--interactive-accent);
+      }
+
+      .writersroom-inline-diff {
+        padding: 0.4rem 0;
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+      }
+
+      .writersroom-inline-diff-row {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.5rem;
+        padding: 0.35rem 0.9rem;
+        font-size: 0.82em;
+        line-height: 1.4;
+        border-left: 3px solid transparent;
+      }
+
+      .writersroom-inline-diff-context-row {
+        color: var(--text-muted);
+      }
+
+      .writersroom-inline-diff-context-row .writersroom-inline-diff-line-num {
+        opacity: 0.6;
+      }
+
+      .writersroom-inline-diff-edit-row {
+        background: var(--background-modifier-form-field);
+        margin: 0 0.5rem;
+        border-radius: 6px;
+        padding: 0.5rem 0.65rem;
+        cursor: pointer;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
+      }
+
+      .writersroom-inline-diff-edit-row:hover {
+        background: var(--background-modifier-hover);
+      }
+
+      .writersroom-inline-diff-edit-row.is-selected {
+        border-left-color: var(--interactive-accent);
+        background: var(--background-modifier-hover);
+      }
+
+      .writersroom-inline-diff-line-num {
+        flex: 0 0 2rem;
+        font-family: var(--font-monospace);
+        font-size: 0.75em;
+        color: var(--text-muted);
+        user-select: none;
+      }
+
+      .writersroom-inline-diff-content {
+        flex: 1 1 auto;
+        min-width: 0;
+      }
+
+      .writersroom-inline-diff-type {
+        font-weight: 600;
+        margin-bottom: 0.3rem;
+        font-size: 0.9em;
+      }
+
+      .writersroom-inline-diff-original {
+        color: var(--text-muted);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .writersroom-inline-diff-original.writersroom-inline-diff-strike {
+        text-decoration: line-through;
+        opacity: 0.85;
+      }
+
+      .writersroom-inline-diff-suggested {
+        margin-top: 0.25rem;
+        padding: 0.3rem 0.4rem;
+        background: var(--background-primary);
+        border-radius: 4px;
+        border-left: 2px solid var(--interactive-accent);
+        color: var(--text-normal);
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      .writersroom-inline-diff-remove-hint {
+        font-style: italic;
+        color: var(--text-muted);
+        border-left-color: var(--color-red, #c44);
+      }
+
+      .writersroom-inline-diff-why {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.45rem;
+        padding: 0.35rem 0.5rem;
+        background: rgba(100, 150, 255, 0.1);
+        border-radius: 4px;
+        border-left: 3px solid rgba(100, 150, 255, 0.5);
+      }
+
+      .writersroom-inline-diff-why-label {
+        font-weight: 600;
+        color: var(--text-normal);
+      }
+
+      .writersroom-inline-diff-why-category {
+        background: var(--interactive-accent);
+        color: var(--text-on-accent, #fff);
+        padding: 0.12rem 0.35rem;
+        border-radius: 3px;
+        font-size: 0.85em;
+        font-weight: 500;
+        text-transform: capitalize;
+      }
+
+      .writersroom-inline-diff-annotation {
+        margin-top: 0.35rem;
+        padding: 0.4rem 0.5rem;
+        background: linear-gradient(135deg, rgba(100, 150, 255, 0.08), rgba(80, 120, 255, 0.06));
+        border-radius: 4px;
+        border-left: 3px solid rgba(100, 150, 255, 0.5);
+        font-size: 0.9em;
+      }
+
+      .writersroom-inline-diff-annotation.writersroom-inline-diff-star {
+        background: rgba(255, 215, 0, 0.12);
+        border-left-color: rgba(255, 193, 7, 0.7);
+      }
+
+      .writersroom-inline-diff-annotation-label {
+        font-weight: 600;
+        margin-right: 0.2rem;
+      }
+
+      .writersroom-inline-diff-annotation-text {
+        font-style: italic;
+        color: var(--text-normal);
+        line-height: 1.4;
+      }
+
+      .writersroom-inline-diff-annotation .writersroom-annotation-formatted,
+      .writersroom-inline-diff-annotation .writersroom-annotation-list-item {
+        margin: 0.25rem 0;
+      }
+
+      .writersroom-inline-diff-actions {
+        display: flex;
+        align-items: center;
+        gap: 0.25rem;
+        flex-shrink: 0;
+        margin-left: 0.25rem;
+      }
+
+      .writersroom-inline-diff-actions .writersroom-sidebar-action-btn {
+        padding: 0.2rem 0.4rem;
+        font-size: 0.85em;
+        min-width: 1.6rem;
       }
 
       .writersroom-quickprompt-suggestion {
@@ -7619,6 +7881,10 @@ class WritersRoomSidebarView extends ItemView {
   private inlineMarkupDraft = "";
   private inlineMarkupOpen = false;
   private inlineMarkupDebounceTimer: number | null = null;
+  /** "list" = classic list of edits; "inline" = document with diffs inline */
+  private editsViewMode: "list" | "inline" = "list";
+  /** Cached document content for inline diff view (cleared when source changes). */
+  private inlineDocumentContent: string | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
     super(leaf);
@@ -7671,11 +7937,13 @@ class WritersRoomSidebarView extends ItemView {
         : []
     };
     
-    // Clear collapsed state when switching to a different document
+    // Clear collapsed state and inline view cache when switching to a different document
     if (sourceChanged) {
       this.collapsedEdits.clear();
+      this.inlineDocumentContent = null;
+      this.editsViewMode = "list";
     }
-    
+
     this.render();
   }
 
@@ -7734,6 +8002,10 @@ class WritersRoomSidebarView extends ItemView {
     containerEl.empty();
     containerEl.addClass("writersroom-sidebar");
 
+    let inlineMarkupDetails: HTMLDetailsElement;
+    let inlineInput: HTMLTextAreaElement;
+    let renderPreviewRef: (() => void) | null = null;
+
     const header = containerEl.createDiv({
       cls: "writersroom-sidebar-header"
     });
@@ -7743,7 +8015,9 @@ class WritersRoomSidebarView extends ItemView {
     });
 
     const fileLabel =
-      this.state.sourcePath?.split("/").pop() ?? "No document selected";
+      this.state.sourcePath === PASTED_CONTENT_SOURCE_PATH
+        ? "Pasted text"
+        : this.state.sourcePath?.split("/").pop() ?? "No document selected";
     headerTop.createEl("div", {
       cls: "writersroom-sidebar-title",
       text: fileLabel
@@ -7769,6 +8043,46 @@ class WritersRoomSidebarView extends ItemView {
     this.requestButton = askButton;
     this.applyRequestState();
 
+    const headerActions = header.createDiv({
+      cls: "writersroom-sidebar-header-actions"
+    });
+    const pasteDiffButton = headerActions.createEl("button", {
+      cls: "writersroom-sidebar-button",
+      text: "paste a diff"
+    });
+    pasteDiffButton.addEventListener("click", async (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!inlineMarkupDetails || !inlineInput) {
+        return;
+      }
+
+      this.inlineMarkupOpen = true;
+      inlineMarkupDetails.open = true;
+      inlineMarkupDetails.scrollIntoView({ block: "start", behavior: "smooth" });
+
+      inlineInput.focus();
+      inlineInput.select();
+
+      const canReadClipboard =
+        typeof navigator !== "undefined" && !!navigator.clipboard?.readText;
+      if (canReadClipboard) {
+        try {
+          const clipboardText = await navigator.clipboard.readText();
+          if (clipboardText.trim().length > 0 && inlineInput.value.trim().length === 0) {
+            inlineInput.value = clipboardText;
+            this.inlineMarkupDraft = clipboardText;
+            renderPreviewRef?.();
+            return;
+          }
+        } catch (error) {
+          this.plugin.logWarn("Clipboard read failed when pasting diff.", error);
+        }
+      }
+
+      new Notice("Paste your diff into the box below.");
+    });
+
     if (this.state.payload?.summary) {
       const summaryDetails = header.createEl("details", {
         cls: "writersroom-sidebar-summary-details"
@@ -7785,7 +8099,7 @@ class WritersRoomSidebarView extends ItemView {
     // --------------------------------------------------------------------------
     // Inline markup preview (Two Flat Cats / in-place revision format)
     // --------------------------------------------------------------------------
-    const inlineMarkupDetails = containerEl.createEl("details", {
+    inlineMarkupDetails = containerEl.createEl("details", {
       cls: "writersroom-inline-markup"
     });
     inlineMarkupDetails.open = this.inlineMarkupOpen;
@@ -7807,8 +8121,21 @@ class WritersRoomSidebarView extends ItemView {
       cls: "writersroom-sidebar-button",
       text: "Clear"
     });
+    const askWithPasteButton = inlineControls.createEl("button", {
+      cls: "writersroom-sidebar-button",
+      text: "Ask the Writers with this text"
+    });
+    askWithPasteButton.addEventListener("click", (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (this.isRequesting) {
+        return;
+      }
+      const text = inlineInput.value;
+      void this.plugin.requestAiEditsForPastedContent(text);
+    });
 
-    const inlineInput = inlineMarkupDetails.createEl("textarea", {
+    inlineInput = inlineMarkupDetails.createEl("textarea", {
       cls: "writersroom-inline-markup-input"
     });
     inlineInput.setAttribute("placeholder", "Paste annotated markdown here…");
@@ -7828,6 +8155,7 @@ class WritersRoomSidebarView extends ItemView {
         this
       );
     };
+    renderPreviewRef = renderPreview;
 
     clearButton.addEventListener("click", (event) => {
       event.preventDefault();
@@ -7902,6 +8230,48 @@ class WritersRoomSidebarView extends ItemView {
           ? "No edits available for this note."
           : "Open a note to view Writers Room edits."
       });
+      return;
+    }
+
+    const sourcePath = this.state.sourcePath;
+    const canShowInline =
+      sourcePath != null &&
+      sourcePath !== PASTED_CONTENT_SOURCE_PATH &&
+      edits.length > 0;
+
+    if (canShowInline) {
+      const viewModeRow = listEl.createDiv({
+        cls: "writersroom-sidebar-view-mode"
+      });
+      const listBtn = viewModeRow.createEl("button", {
+        cls: "writersroom-sidebar-view-mode-btn",
+        text: "List"
+      });
+      const inlineBtn = viewModeRow.createEl("button", {
+        cls: "writersroom-sidebar-view-mode-btn",
+        text: "Inline"
+      });
+      if (this.editsViewMode === "list") {
+        listBtn.addClass("is-active");
+      } else {
+        inlineBtn.addClass("is-active");
+      }
+      listBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        this.editsViewMode = "list";
+        this.render();
+      });
+      inlineBtn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void this.switchToInlineView();
+      });
+    }
+
+    if (this.editsViewMode === "inline" && this.inlineDocumentContent !== null && sourcePath) {
+      this.renderInlineDiff(listEl, this.inlineDocumentContent, this.state.payload!, sourcePath);
+      this.applySelection();
       return;
     }
 
@@ -8143,6 +8513,199 @@ class WritersRoomSidebarView extends ItemView {
     this.applySelection();
   }
 
+  private async switchToInlineView(): Promise<void> {
+    const sourcePath = this.state.sourcePath;
+    if (!sourcePath || sourcePath === PASTED_CONTENT_SOURCE_PATH) {
+      new Notice("Inline view is only available for saved notes.");
+      return;
+    }
+    const content = await this.plugin.getDocumentContentForSource(sourcePath);
+    if (content === null) {
+      new Notice("Inline view is only available for saved notes.");
+      return;
+    }
+    this.inlineDocumentContent = content;
+    this.editsViewMode = "inline";
+    this.render();
+  }
+
+  private renderInlineDiff(
+    container: HTMLElement,
+    documentContent: string,
+    payload: EditPayload,
+    sourcePath: string
+  ): void {
+    const editsByLine = new Map<
+      number,
+      { edit: EditEntry; index: number; anchorId: string }
+    >();
+    payload.edits.forEach((edit, index) => {
+      const anchorId = this.plugin.getAnchorForEdit(edit, index);
+      editsByLine.set(edit.line, { edit, index, anchorId });
+    });
+
+    const docLines = documentContent.split("\n");
+    const wrapper = container.createDiv({ cls: "writersroom-inline-diff" });
+
+    for (let lineNum = 1; lineNum <= docLines.length; lineNum++) {
+      const lineText = docLines[lineNum - 1] ?? "";
+      const block = editsByLine.get(lineNum);
+
+      if (block) {
+        const { edit, index, anchorId } = block;
+        const isSelected = this.state.selectedAnchorId === anchorId;
+        const row = wrapper.createDiv({
+          cls: "writersroom-inline-diff-row writersroom-inline-diff-edit-row"
+        });
+        row.setAttribute("data-anchor-id", anchorId);
+        if (isSelected) {
+          row.addClass("is-selected");
+        }
+
+        const lineNumEl = row.createDiv({
+          cls: "writersroom-inline-diff-line-num",
+          text: String(lineNum)
+        });
+
+        const contentCol = row.createDiv({
+          cls: "writersroom-inline-diff-content"
+        });
+
+        contentCol.createDiv({
+          cls: "writersroom-inline-diff-type",
+          text: `${this.getEditTypeIcon(edit.type)} ${edit.type}`
+        });
+
+        const originalEl = contentCol.createDiv({
+          cls: "writersroom-inline-diff-original",
+          text: edit.original_text.trim() || "(empty)"
+        });
+        if (
+          edit.type === "replacement" ||
+          edit.type === "subtraction" ||
+          edit.type === "annotation"
+        ) {
+          originalEl.addClass("writersroom-inline-diff-strike");
+        }
+
+        if (
+          (edit.type === "replacement" || edit.type === "addition") &&
+          typeof edit.output === "string" &&
+          edit.output.length > 0
+        ) {
+          contentCol.createDiv({
+            cls: "writersroom-inline-diff-suggested",
+            text: edit.output
+          });
+        } else if (edit.type === "subtraction") {
+          contentCol.createDiv({
+            cls: "writersroom-inline-diff-suggested writersroom-inline-diff-remove-hint",
+            text: "(remove)"
+          });
+        }
+
+        const whyEl = contentCol.createDiv({
+          cls: "writersroom-inline-diff-why"
+        });
+        whyEl.createEl("span", {
+          cls: "writersroom-inline-diff-why-label",
+          text: "Why:"
+        });
+        whyEl.createEl("span", {
+          cls: "writersroom-inline-diff-why-category",
+          text: edit.category
+        });
+        const commentary =
+          edit.annotation ??
+          (edit.type === "annotation" || edit.type === "star"
+            ? (typeof edit.output === "string" ? edit.output : null)
+            : null);
+        if (commentary) {
+          const annotationBox = contentCol.createDiv({
+            cls:
+              edit.type === "star"
+                ? "writersroom-inline-diff-annotation writersroom-inline-diff-star"
+                : "writersroom-inline-diff-annotation"
+          });
+          annotationBox.createEl("span", {
+            cls: "writersroom-inline-diff-annotation-label",
+            text: edit.type === "star" ? "⭐ " : "💭 "
+          });
+          const formatted = this.formatAnnotationText(commentary);
+          formatted.addClass("writersroom-inline-diff-annotation-text");
+          annotationBox.appendChild(formatted);
+        }
+
+        const actionsCol = row.createDiv({
+          cls: "writersroom-inline-diff-actions"
+        });
+        const canApply =
+          edit.type === "subtraction" ||
+          ((edit.type === "addition" || edit.type === "replacement") &&
+            typeof edit.output === "string" &&
+            edit.output.length > 0);
+        if (canApply) {
+          const acceptBtn = actionsCol.createEl("button", {
+            cls: "writersroom-sidebar-action-btn writersroom-action-accept",
+            text: "✓",
+            attr: { title: "Accept" }
+          });
+          acceptBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void this.plugin.applySidebarEdit(sourcePath, anchorId);
+          });
+        }
+        if (edit.type !== "star") {
+          const denyBtn = actionsCol.createEl("button", {
+            cls: "writersroom-sidebar-action-btn writersroom-action-deny",
+            text: "✗",
+            attr: { title: "Deny" }
+          });
+          denyBtn.addEventListener("click", (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            void this.plugin.resolveSidebarEdit(sourcePath, anchorId);
+          });
+        }
+        const jumpBtn = actionsCol.createEl("button", {
+          cls: "writersroom-sidebar-action-btn",
+          text: "↗",
+          attr: { title: "Jump to line" }
+        });
+        jumpBtn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void this.plugin.jumpToAnchor(sourcePath, anchorId);
+        });
+
+        row.addEventListener("click", (e) => {
+          if ((e.target as HTMLElement).closest("button")) {
+            return;
+          }
+          e.preventDefault();
+          e.stopPropagation();
+          void this.plugin.handleSidebarSelection(sourcePath, anchorId);
+        });
+      } else {
+        const row = wrapper.createDiv({
+          cls: "writersroom-inline-diff-row writersroom-inline-diff-context-row"
+        });
+        row.createDiv({
+          cls: "writersroom-inline-diff-line-num",
+          text: String(lineNum)
+        });
+        const contentCol = row.createDiv({
+          cls: "writersroom-inline-diff-content"
+        });
+        contentCol.createEl("span", {
+          cls: "writersroom-inline-diff-context-text",
+          text: lineText || " "
+        });
+      }
+    }
+  }
+
   private getEditTypeIcon(type: EditEntry["type"]): string {
     switch (type) {
       case "addition":
@@ -8208,24 +8771,32 @@ class WritersRoomSidebarView extends ItemView {
   }
 
   private applySelection(): void {
-    const items = this.containerEl.querySelectorAll<HTMLElement>(
+    const listItems = this.containerEl.querySelectorAll<HTMLElement>(
       ".writersroom-sidebar-item"
     );
-
-    items.forEach((el) => el.classList.remove("is-selected"));
+    const inlineRows = this.containerEl.querySelectorAll<HTMLElement>(
+      ".writersroom-inline-diff-edit-row"
+    );
+    listItems.forEach((el) => el.classList.remove("is-selected"));
+    inlineRows.forEach((el) => el.classList.remove("is-selected"));
 
     if (!this.state.selectedAnchorId) {
       return;
     }
 
-    const activeItem = this.containerEl.querySelector<HTMLElement>(
-      `.writersroom-sidebar-item[data-anchor-id="${this.state.selectedAnchorId}"]`
-    );
+    const selector = `[data-anchor-id="${this.state.selectedAnchorId}"]`;
+    const activeItem =
+      this.containerEl.querySelector<HTMLElement>(
+        `.writersroom-sidebar-item${selector}`
+      ) ??
+      this.containerEl.querySelector<HTMLElement>(
+        `.writersroom-inline-diff-edit-row${selector}`
+      );
 
     if (activeItem) {
       activeItem.classList.add("is-selected");
-      activeItem.scrollIntoView({ 
-        block: "center", 
+      activeItem.scrollIntoView({
+        block: "center",
         behavior: "smooth",
         inline: "nearest"
       });
@@ -8236,16 +8807,20 @@ class WritersRoomSidebarView extends ItemView {
     if (!anchorId) {
       return;
     }
-    
-    // Use requestAnimationFrame to ensure DOM is updated
+
     requestAnimationFrame(() => {
-      const activeItem = this.containerEl.querySelector<HTMLElement>(
-        `.writersroom-sidebar-item[data-anchor-id="${anchorId}"]`
-      );
-      
+      const selector = `[data-anchor-id="${anchorId}"]`;
+      const activeItem =
+        this.containerEl.querySelector<HTMLElement>(
+          `.writersroom-sidebar-item${selector}`
+        ) ??
+        this.containerEl.querySelector<HTMLElement>(
+          `.writersroom-inline-diff-edit-row${selector}`
+        );
+
       if (activeItem) {
-        activeItem.scrollIntoView({ 
-          block: "center", 
+        activeItem.scrollIntoView({
+          block: "center",
           behavior: "smooth",
           inline: "nearest"
         });
