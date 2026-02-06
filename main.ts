@@ -20,6 +20,7 @@ import {
 import { existsSync, readdirSync } from "fs";
 import { createRequire } from "module";
 import { join } from "path";
+import { transformInlineEditMarkupToMarkdown } from "./inlineMarkup";
 
 type CMEditorView = import("@codemirror/view").EditorView;
 type CMViewUpdate = import("@codemirror/view").ViewUpdate;
@@ -218,6 +219,24 @@ type AudiconType =
   | "navigate-next"  // Navigation between edits
   | "navigate-prev";
 
+type AudiconCartridgeTrack = {
+  type: AudiconType;
+  label: string;
+  description: string;
+  durationMs: number;
+};
+
+const AUDICON_CARTRIDGE: readonly AudiconCartridgeTrack[] = [
+  { type: "selection", label: "Selection", description: "Soft ascending tone", durationMs: 90 },
+  { type: "apply", label: "Apply", description: "Confident double-beep", durationMs: 160 },
+  { type: "resolve", label: "Resolve", description: "Descending tone", durationMs: 90 },
+  { type: "request-start", label: "Request start", description: "Ascending sweep", durationMs: 170 },
+  { type: "request-complete", label: "Request complete", description: "Success chime (3 notes)", durationMs: 260 },
+  { type: "request-error", label: "Request error", description: "Low warning tone", durationMs: 220 },
+  { type: "navigate-next", label: "Navigate next", description: "Quick high blip", durationMs: 60 },
+  { type: "navigate-prev", label: "Navigate previous", description: "Quick low blip", durationMs: 60 }
+] as const;
+
 class AudiconPlayer {
   private audioContext: AudioContext | null = null;
   private enabled: boolean = true;
@@ -239,6 +258,14 @@ class AudiconPlayer {
     this.enabled = enabled;
   }
 
+  isAvailable(): boolean {
+    return this.audioContext !== null;
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
   play(type: AudiconType): void {
     if (!this.enabled || !this.audioContext) {
       return;
@@ -246,6 +273,13 @@ class AudiconPlayer {
 
     try {
       const ctx = this.audioContext;
+      if (ctx.state === "suspended") {
+        try {
+          void ctx.resume();
+        } catch {
+          // ignore resume failures
+        }
+      }
       const now = ctx.currentTime;
 
       // Create gain node for volume control
@@ -1966,6 +2000,14 @@ export default class WritersRoomPlugin extends Plugin {
       name: "Open Writers Room sidebar",
       callback: async () => {
         await this.openSidebarForActiveFile();
+      }
+    });
+
+    this.addCommand({
+      id: "writers-room-audicon-sound-test",
+      name: "Audicon sound test",
+      callback: () => {
+        new WritersRoomAudiconTestModal(this.app, this).open();
       }
     });
 
@@ -6306,6 +6348,69 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
         white-space: pre-wrap;
       }
 
+      .writersroom-inline-markup {
+        margin: 0.65rem 0.9rem 0.2rem;
+        padding: 0.55rem 0.65rem;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        background: var(--background-secondary);
+      }
+
+      .writersroom-inline-markup > summary {
+        cursor: pointer;
+        font-weight: 600;
+        list-style: none;
+        outline: none;
+      }
+
+      .writersroom-inline-markup > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .writersroom-inline-markup-help {
+        font-size: 0.8em;
+        color: var(--text-muted);
+        margin-top: 0.35rem;
+        line-height: 1.35;
+      }
+
+      .writersroom-inline-markup-controls {
+        display: flex;
+        justify-content: flex-end;
+        gap: 0.35rem;
+        margin-top: 0.5rem;
+      }
+
+      .writersroom-inline-markup-input {
+        width: 100%;
+        min-height: 7rem;
+        margin-top: 0.5rem;
+        padding: 0.6rem;
+        border-radius: 6px;
+        border: 1px solid var(--background-modifier-border);
+        background: var(--background-primary);
+        color: var(--text-normal);
+        font-family: var(--font-monospace);
+        font-size: 0.85em;
+        resize: vertical;
+      }
+
+      .writersroom-inline-markup-preview {
+        margin-top: 0.6rem;
+        padding: 0.6rem;
+        border-radius: 6px;
+        border: 1px solid var(--background-modifier-border);
+        background: var(--background-primary);
+        overflow: auto;
+        max-height: 40vh;
+      }
+
+      .writersroom-inline-note {
+        font-style: italic;
+        border-radius: 4px;
+        padding: 0 0.15em;
+      }
+
       .writersroom-token-wrapper {
         padding: 0.45rem 0.9rem 0.2rem;
       }
@@ -6706,6 +6811,55 @@ export function buildWritersRoomCss(colorScheme: ColorScheme = "default"): strin
 
       .writersroom-quick-result-modal {
         max-width: 640px;
+      }
+
+      .writersroom-audicon-modal {
+        max-width: 560px;
+      }
+
+      .writersroom-audicon-note {
+        color: var(--text-muted);
+        font-size: 0.85em;
+        margin-top: 0.35rem;
+        margin-bottom: 0.65rem;
+      }
+
+      .writersroom-audicon-controls {
+        display: flex;
+        gap: 0.5rem;
+        margin: 0.5rem 0 0.75rem;
+      }
+
+      .writersroom-audicon-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0.4rem;
+      }
+
+      .writersroom-audicon-track {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 0.75rem;
+        padding: 0.6rem 0.65rem;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        background: var(--background-secondary);
+      }
+
+      .writersroom-audicon-track-title {
+        font-weight: 600;
+      }
+
+      .writersroom-audicon-track-desc {
+        margin-top: 0.15rem;
+        color: var(--text-muted);
+        font-size: 0.85em;
+        line-height: 1.3;
+      }
+
+      .writersroom-audicon-track-actions button {
+        cursor: pointer;
       }
 
       .writersroom-quick-result-header {
@@ -7325,6 +7479,132 @@ class WritersRoomQuickResultModal extends Modal {
   }
 }
 
+class WritersRoomAudiconTestModal extends Modal {
+  private plugin: WritersRoomPlugin;
+  private player: AudiconPlayer;
+  private scheduledTimers: number[] = [];
+  private playAllInProgress = false;
+
+  constructor(app: App, plugin: WritersRoomPlugin) {
+    super(app);
+    this.plugin = plugin;
+    // Use a dedicated player so the sound test works even if the global audicons setting is disabled.
+    this.player = new AudiconPlayer();
+    this.player.setEnabled(true);
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.empty();
+    contentEl.addClass("writersroom-audicon-modal");
+
+    contentEl.createEl("h2", { text: "Audicon sound test" });
+
+    if (!this.player.isAvailable()) {
+      contentEl.createDiv({
+        cls: "writersroom-audicon-note",
+        text: "AudioContext is unavailable in this environment, so audicons can't play."
+      });
+      return;
+    }
+
+    const mutedBySetting = !this.plugin.settings.audibleFeedback;
+    if (mutedBySetting) {
+      contentEl.createDiv({
+        cls: "writersroom-audicon-note",
+        text: "Note: “Audible Feedback” is currently off in settings. This test still plays sounds."
+      });
+    }
+
+    const controls = contentEl.createDiv({ cls: "writersroom-audicon-controls" });
+    const playAllBtn = controls.createEl("button", { text: "Play all" });
+    playAllBtn.addClass("mod-cta");
+    const stopBtn = controls.createEl("button", { text: "Stop" });
+
+    playAllBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void this.playAll();
+    });
+
+    stopBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.stop();
+    });
+
+    const list = contentEl.createDiv({ cls: "writersroom-audicon-list" });
+    for (const track of AUDICON_CARTRIDGE) {
+      const row = list.createDiv({ cls: "writersroom-audicon-track" });
+      const meta = row.createDiv({ cls: "writersroom-audicon-track-meta" });
+      meta.createDiv({ cls: "writersroom-audicon-track-title", text: track.label });
+      meta.createDiv({ cls: "writersroom-audicon-track-desc", text: track.description });
+
+      const actions = row.createDiv({ cls: "writersroom-audicon-track-actions" });
+      const btn = actions.createEl("button", { text: "Play" });
+      btn.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.stop();
+        this.player.play(track.type);
+      });
+    }
+  }
+
+  onClose(): void {
+    this.stop();
+    this.player.dispose();
+    this.contentEl.empty();
+    this.contentEl.removeClass("writersroom-audicon-modal");
+  }
+
+  private stop(): void {
+    this.playAllInProgress = false;
+    if (typeof window !== "undefined") {
+      for (const timer of this.scheduledTimers) {
+        window.clearTimeout(timer);
+      }
+    }
+    this.scheduledTimers = [];
+  }
+
+  private async playAll(): Promise<void> {
+    if (this.playAllInProgress) {
+      return;
+    }
+    this.stop();
+    this.playAllInProgress = true;
+
+    const spacingMs = 140;
+    let delayMs = 0;
+
+    for (const track of AUDICON_CARTRIDGE) {
+      if (typeof window === "undefined") {
+        this.player.play(track.type);
+        continue;
+      }
+
+      const timer = window.setTimeout(() => {
+        if (!this.playAllInProgress) {
+          return;
+        }
+        this.player.play(track.type);
+      }, delayMs);
+      this.scheduledTimers.push(timer);
+      delayMs += Math.max(60, track.durationMs) + spacingMs;
+    }
+
+    if (typeof window !== "undefined") {
+      const finalTimer = window.setTimeout(() => {
+        this.playAllInProgress = false;
+      }, delayMs + 25);
+      this.scheduledTimers.push(finalTimer);
+    } else {
+      this.playAllInProgress = false;
+    }
+  }
+}
+
 class WritersRoomSidebarView extends ItemView {
   private plugin: WritersRoomPlugin;
   private state: SidebarState = {
@@ -7336,6 +7616,9 @@ class WritersRoomSidebarView extends ItemView {
   private requestButton: HTMLButtonElement | null = null;
   private isRequesting = false;
   private collapsedEdits = new Set<string>(); // Track which edits are collapsed by anchor ID
+  private inlineMarkupDraft = "";
+  private inlineMarkupOpen = false;
+  private inlineMarkupDebounceTimer: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
     super(leaf);
@@ -7363,6 +7646,10 @@ class WritersRoomSidebarView extends ItemView {
   onClose(): void {
     this.plugin.unregisterSidebar(this);
     this.collapsedEdits.clear();
+    if (this.inlineMarkupDebounceTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.inlineMarkupDebounceTimer);
+      this.inlineMarkupDebounceTimer = null;
+    }
     this.state = {
       sourcePath: null,
       payload: null,
@@ -7439,6 +7726,10 @@ class WritersRoomSidebarView extends ItemView {
   }
 
   private render(): void {
+    if (this.inlineMarkupDebounceTimer !== null && typeof window !== "undefined") {
+      window.clearTimeout(this.inlineMarkupDebounceTimer);
+      this.inlineMarkupDebounceTimer = null;
+    }
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("writersroom-sidebar");
@@ -7489,6 +7780,80 @@ class WritersRoomSidebarView extends ItemView {
         cls: "writersroom-sidebar-summary-content",
         text: this.state.payload.summary
       });
+    }
+
+    // --------------------------------------------------------------------------
+    // Inline markup preview (Two Flat Cats / in-place revision format)
+    // --------------------------------------------------------------------------
+    const inlineMarkupDetails = containerEl.createEl("details", {
+      cls: "writersroom-inline-markup"
+    });
+    inlineMarkupDetails.open = this.inlineMarkupOpen;
+    inlineMarkupDetails.addEventListener("toggle", () => {
+      this.inlineMarkupOpen = inlineMarkupDetails.open;
+    });
+    inlineMarkupDetails.createEl("summary", {
+      text: "Inline markup preview"
+    });
+    inlineMarkupDetails.createDiv({
+      cls: "writersroom-inline-markup-help",
+      text: "Paste text that uses ~~deletions~~, +insertions+, and [AGENT: notes] to preview it with Writers Room highlights."
+    });
+
+    const inlineControls = inlineMarkupDetails.createDiv({
+      cls: "writersroom-inline-markup-controls"
+    });
+    const clearButton = inlineControls.createEl("button", {
+      cls: "writersroom-sidebar-button",
+      text: "Clear"
+    });
+
+    const inlineInput = inlineMarkupDetails.createEl("textarea", {
+      cls: "writersroom-inline-markup-input"
+    });
+    inlineInput.setAttribute("placeholder", "Paste annotated markdown here…");
+    inlineInput.value = this.inlineMarkupDraft;
+
+    const inlinePreview = inlineMarkupDetails.createDiv({
+      cls: "writersroom-inline-markup-preview"
+    });
+
+    const renderPreview = () => {
+      inlinePreview.empty();
+      const transformed = transformInlineEditMarkupToMarkdown(this.inlineMarkupDraft);
+      MarkdownRenderer.renderMarkdown(
+        transformed,
+        inlinePreview,
+        this.state.sourcePath ?? "",
+        this
+      );
+    };
+
+    clearButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.inlineMarkupDraft = "";
+      inlineInput.value = "";
+      renderPreview();
+    });
+
+    inlineInput.addEventListener("input", () => {
+      this.inlineMarkupDraft = inlineInput.value;
+      if (this.inlineMarkupDebounceTimer !== null && typeof window !== "undefined") {
+        window.clearTimeout(this.inlineMarkupDebounceTimer);
+      }
+      if (typeof window !== "undefined") {
+        this.inlineMarkupDebounceTimer = window.setTimeout(() => {
+          this.inlineMarkupDebounceTimer = null;
+          renderPreview();
+        }, 150);
+      } else {
+        renderPreview();
+      }
+    });
+
+    if (this.inlineMarkupDraft.trim().length > 0) {
+      renderPreview();
     }
 
     const edits = this.state.payload?.edits ?? [];
@@ -8116,6 +8481,16 @@ class WritersRoomSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
     });
     (audibleFeedbackSetting as any).controlEl.appendChild(audibleToggle);
+
+    new Setting(containerEl)
+      .setName("Audicon sound test")
+      .setDesc("Preview all built-in audicon tracks (selection/apply/resolve/etc).")
+      .addButton((button) => {
+        button.setButtonText("Open");
+        button.onClick(() => {
+          new WritersRoomAudiconTestModal(this.app, this.plugin).open();
+        });
+      });
 
     // ============================================================================
     // AGENTIC WORKFLOW SETTINGS
