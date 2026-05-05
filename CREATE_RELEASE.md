@@ -2,23 +2,37 @@
 
 Since you don't have GitHub CLI (`gh`) installed, here are two options:
 
-## Option 1: Create Release via GitHub Web Interface (Recommended)
+## Why BRAT says "no manifest.json"
 
-1. **Go to your GitHub repository**: https://github.com/Arcadesys/writersroom/releases/new
+BRAT installs from your **latest GitHub Release**. It does not use the repo root or draft releases. If you see "This does not seem to be an obsidian plugin" or "manifest.json does not exist in the latest release", you need a **published** (non-draft) release that includes both `main.js` and `manifest.json`.
+
+## Option 1: Publish the existing draft (quickest)
+
+If you already pushed a tag (e.g. `2.0.6`), the GitHub Action created a **draft** release:
+
+1. **Open Releases**: https://github.com/arcadesys/writersroom/releases
+2. Find the **draft** release for the tag you want (e.g. `2.0.6`).
+3. Click **Edit** (pencil) on that draft.
+4. Click **Publish release** (not "Save draft").
+
+BRAT will then see the release and install correctly.
+
+## Option 1b: Create release via GitHub web (no tag yet)
+
+1. **Go to your GitHub repository**: https://github.com/arcadesys/writersroom/releases/new
 
 2. **Fill in the release form**:
-   - **Tag**: Select existing tag `0.1.0` (or type it)
-   - **Release title**: `0.1.0`
-   - **Description**: `Initial beta release for BRAT`
+   - **Tag**: Select or create tag (e.g. `2.0.6` to match `manifest.json`)
+   - **Release title**: same as tag
+   - **Description**: Optional (e.g. "BRAT beta")
 
-3. **Upload the required files**:
-   - Drag and drop or click to upload these files from your plugin folder:
-     - `main.js` (required)
-     - `manifest.json` (required)
+3. **Upload the required files** (from your plugin folder):
+   - `main.js` (run `npm run build` first if needed)
+   - `manifest.json`
 
-4. **Publish the release** (don't keep it as a draft)
+4. **Publish the release** (do not leave it as draft).
 
-5. **Try BRAT again** - it should now find the release!
+5. **Try BRAT again** — it should now find the release.
 
 ## Option 2: Install GitHub CLI and automate future releases
 
