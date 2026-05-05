@@ -2579,6 +2579,26 @@ export default class WritersRoomPlugin extends Plugin {
         (edit as { line: number }).line = resolvedLineNumber;
       }
 
+      // Build comprehensive aria-label for screen readers
+      const outputText = typeof edit.output === "string" ? edit.output : null;
+      let ariaLabel = `Edit on line ${resolvedLineNumber}: ${edit.type}. Reason: ${edit.category}. `;
+      ariaLabel += `Original text: ${edit.original_text}. `;
+      if (edit.annotation) {
+        ariaLabel += `Commentary: ${edit.annotation}. `;
+      }
+      if (outputText || edit.type === "subtraction") {
+        if (edit.type === "subtraction") {
+          ariaLabel += "Updated text: Text will be removed. ";
+        } else if (outputText) {
+          ariaLabel += `Updated text: ${outputText}. `;
+        }
+      } else if (edit.type === "annotation" || edit.type === "star") {
+        if (outputText) {
+          ariaLabel += `Commentary: ${outputText}. `;
+        }
+      }
+      ariaLabel += "Click to view in sidebar or press Enter to jump to sidebar.";
+
       const attributes: Record<string, string> = {
         "data-writersroom-anchor": anchorId,
         "data-wr-source": sourcePath,
@@ -2590,7 +2610,7 @@ export default class WritersRoomPlugin extends Plugin {
         "data-wr-original": edit.original_text,
         tabindex: "-1",
         role: "button",
-        "aria-label": `Edit on line ${edit.line}: ${edit.type}`,
+        "aria-label": ariaLabel,
         title: `Edit ${edit.type} (${edit.category})`,
         "data-wr-bound": "editor"
       };
@@ -7336,6 +7356,7 @@ class WritersRoomSidebarView extends ItemView {
   private requestButton: HTMLButtonElement | null = null;
   private isRequesting = false;
   private collapsedEdits = new Set<string>(); // Track which edits are collapsed by anchor ID
+  private liveRegion: HTMLElement | null = null; // Aria-live region for screen reader announcements
 
   constructor(leaf: WorkspaceLeaf, plugin: WritersRoomPlugin) {
     super(leaf);
@@ -7442,6 +7463,19 @@ class WritersRoomSidebarView extends ItemView {
     const { containerEl } = this;
     containerEl.empty();
     containerEl.addClass("writersroom-sidebar");
+
+    // Add aria-live region for screen reader announcements
+    const liveRegion = containerEl.createDiv({
+      cls: "writersroom-sidebar-live-region",
+      attr: {
+        "role": "status",
+        "aria-live": "polite",
+        "aria-atomic": "true",
+        "aria-relevant": "additions text",
+        "style": "position: absolute; left: -10000px; width: 1px; height: 1px; overflow: hidden;"
+      }
+    });
+    this.liveRegion = liveRegion;
 
     const header = containerEl.createDiv({
       cls: "writersroom-sidebar-header"
@@ -7550,11 +7584,19 @@ class WritersRoomSidebarView extends ItemView {
       
       const itemEl = listEl.createDiv({
         cls: "writersroom-sidebar-item",
-        attr: { "data-anchor-id": anchorId }
+        attr: { 
+          "data-anchor-id": anchorId,
+          "role": "article",
+          "aria-label": `Edit ${index + 1} of ${edits.length}: ${edit.type} on line ${edit.line}`,
+          "tabindex": isSelected ? "0" : "-1"
+        }
       });
 
       if (isSelected) {
         itemEl.addClass("is-selected");
+        itemEl.setAttribute("aria-current", "true");
+      } else {
+        itemEl.removeAttribute("aria-current");
       }
       
       if (isCollapsed) {
@@ -7563,23 +7605,37 @@ class WritersRoomSidebarView extends ItemView {
 
       itemEl.createDiv({
         cls: "writersroom-sidebar-item-icon",
-        text: this.getEditTypeIcon(edit.type)
+        text: this.getEditTypeIcon(edit.type),
+        attr: {
+          "aria-hidden": "true"
+        }
       });
 
       const contentEl = itemEl.createDiv({
         cls: "writersroom-sidebar-item-content"
       });
 
-      contentEl.createEl("div", {
+      // Edit type heading - focusable for screen readers
+      const headingEl = contentEl.createEl("div", {
         cls: "writersroom-sidebar-item-heading",
-        text: edit.type
+        text: edit.type,
+        attr: {
+          "role": "heading",
+          "aria-level": "3",
+          "tabindex": isSelected && !isCollapsed ? "0" : "-1",
+          "id": `${anchorId}-type`,
+          "aria-label": `Edit type: ${edit.type}`
+        }
       });
 
       // If collapsed, only show heading and stop
       if (isCollapsed) {
         contentEl.createEl("div", {
           cls: "writersroom-sidebar-item-collapsed-hint",
-          text: "Click to expand"
+          text: "Click to expand",
+          attr: {
+            "aria-hidden": "true"
+          }
         });
       } else {
         // Full expanded view
@@ -7587,15 +7643,25 @@ class WritersRoomSidebarView extends ItemView {
 
         // Show "Why" - Category prominently at the top
         const reasonEl = contentEl.createEl("div", {
-          cls: "writersroom-sidebar-item-reason"
+          cls: "writersroom-sidebar-item-reason",
+          attr: {
+            "role": "text",
+            "aria-label": `Reason: ${edit.category}`
+          }
         });
         reasonEl.createEl("span", {
           cls: "writersroom-sidebar-item-reason-label",
-          text: "Why:"
+          text: "Why:",
+          attr: {
+            "aria-hidden": "true"
+          }
         });
         reasonEl.createEl("span", {
           cls: "writersroom-sidebar-item-reason-category",
-          text: edit.category
+          text: edit.category,
+          attr: {
+            "aria-hidden": "true"
+          }
         });
         // Note: Detailed annotation is shown in the annotation box below, not here to avoid duplication
 
@@ -7603,34 +7669,68 @@ class WritersRoomSidebarView extends ItemView {
           // For annotations, show the original text as context
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-label",
-            text: "Original text:"
+            text: "Original text:",
+            attr: {
+              "aria-hidden": "true"
+            }
           });
-          contentEl.createEl("div", {
+          // Original text - focusable for screen readers
+          const originalEl = contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
-            text: previewText(edit.original_text)
+            text: previewText(edit.original_text),
+            attr: {
+              "tabindex": isSelected ? "0" : "-1",
+              "id": `${anchorId}-original`,
+              "role": "textbox",
+              "aria-label": "Original text",
+              "aria-readonly": "true"
+            }
           });
           // Show the annotation comment in full (never truncate editorial comments)
           if (outputText) {
             const formattedAnnotation = this.formatAnnotationText(outputText);
             formattedAnnotation.addClass("writersroom-sidebar-item-snippet");
             formattedAnnotation.addClass("writersroom-sidebar-annotation-text");
+            formattedAnnotation.setAttribute("tabindex", isSelected ? "0" : "-1");
+            formattedAnnotation.setAttribute("id", `${anchorId}-commentary`);
+            formattedAnnotation.setAttribute("role", "textbox");
+            formattedAnnotation.setAttribute("aria-label", "Commentary");
+            formattedAnnotation.setAttribute("aria-readonly", "true");
             contentEl.appendChild(formattedAnnotation);
           } else {
             // Show placeholder for legacy annotations without output text
-            contentEl.createEl("div", {
+            const placeholderEl = contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-snippet writersroom-sidebar-annotation-text",
-              text: "(Annotation comment not available - request new edits to see comments)"
+              text: "(Annotation comment not available - request new edits to see comments)",
+              attr: {
+                "tabindex": isSelected ? "0" : "-1",
+                "id": `${anchorId}-commentary`,
+                "role": "textbox",
+                "aria-label": "Commentary",
+                "aria-readonly": "true"
+              }
             });
           }
         } else if (edit.type === "star") {
           // Stars: show original text and star comment
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-label",
-            text: "Starred text:"
+            text: "Starred text:",
+            attr: {
+              "aria-hidden": "true"
+            }
           });
-          contentEl.createEl("div", {
+          // Original text - focusable for screen readers
+          const originalEl = contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
-            text: previewText(edit.original_text)
+            text: previewText(edit.original_text),
+            attr: {
+              "tabindex": isSelected ? "0" : "-1",
+              "id": `${anchorId}-original`,
+              "role": "textbox",
+              "aria-label": "Starred text",
+              "aria-readonly": "true"
+            }
           });
 
           // Show star comments in full (never truncate editorial praise)
@@ -7638,17 +7738,32 @@ class WritersRoomSidebarView extends ItemView {
             // Add a label to make the commentary more prominent
             contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-label",
-              text: "Commentary:"
+              text: "Commentary:",
+              attr: {
+                "aria-hidden": "true"
+              }
             });
             const formattedStar = this.formatAnnotationText(outputText);
             formattedStar.addClass("writersroom-sidebar-item-snippet");
             formattedStar.addClass("writersroom-sidebar-star-text");
+            formattedStar.setAttribute("tabindex", isSelected ? "0" : "-1");
+            formattedStar.setAttribute("id", `${anchorId}-commentary`);
+            formattedStar.setAttribute("role", "textbox");
+            formattedStar.setAttribute("aria-label", "Commentary");
+            formattedStar.setAttribute("aria-readonly", "true");
             contentEl.appendChild(formattedStar);
           } else {
             // Show placeholder for stars without comment text
             contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-snippet writersroom-sidebar-star-text",
-              text: "⭐ (Effective passage - no additional comment)"
+              text: "⭐ (Effective passage - no additional comment)",
+              attr: {
+                "tabindex": isSelected ? "0" : "-1",
+                "id": `${anchorId}-commentary`,
+                "role": "textbox",
+                "aria-label": "Commentary",
+                "aria-readonly": "true"
+              }
             });
           }
         } else {
@@ -7656,24 +7771,47 @@ class WritersRoomSidebarView extends ItemView {
           // Show original text with label
           contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-label",
-            text: "Original text:"
+            text: "Original text:",
+            attr: {
+              "aria-hidden": "true"
+            }
           });
-          contentEl.createEl("div", {
+          // Original text - focusable for screen readers
+          const originalEl = contentEl.createEl("div", {
             cls: "writersroom-sidebar-item-original",
-            text: previewText(edit.original_text)
+            text: previewText(edit.original_text),
+            attr: {
+              "tabindex": isSelected ? "0" : "-1",
+              "id": `${anchorId}-original`,
+              "role": "textbox",
+              "aria-label": "Original text",
+              "aria-readonly": "true"
+            }
           });
           
           // If this edit has a merged annotation, show it prominently BEFORE the output
           if (edit.annotation) {
             const annotationBox = contentEl.createEl("div", {
-              cls: "writersroom-sidebar-item-annotation-box"
+              cls: "writersroom-sidebar-item-annotation-box",
+              attr: {
+                "role": "region",
+                "aria-label": "Writer's note"
+              }
             });
             annotationBox.createEl("div", {
               cls: "writersroom-sidebar-item-annotation-label",
-              text: "💭 Writer's note:"
+              text: "💭 Writer's note:",
+              attr: {
+                "aria-hidden": "true"
+              }
             });
             const formattedAnnotation = this.formatAnnotationText(edit.annotation);
             formattedAnnotation.addClass("writersroom-sidebar-item-annotation-text");
+            formattedAnnotation.setAttribute("tabindex", isSelected ? "0" : "-1");
+            formattedAnnotation.setAttribute("id", `${anchorId}-commentary`);
+            formattedAnnotation.setAttribute("role", "textbox");
+            formattedAnnotation.setAttribute("aria-label", "Commentary");
+            formattedAnnotation.setAttribute("aria-readonly", "true");
             annotationBox.appendChild(formattedAnnotation);
           }
           
@@ -7686,17 +7824,35 @@ class WritersRoomSidebarView extends ItemView {
               : "Suggested change:";
             contentEl.createEl("div", {
               cls: "writersroom-sidebar-item-label",
-              text: editLabel
+              text: editLabel,
+              attr: {
+                "aria-hidden": "true"
+              }
             });
             if (outputText) {
+              // Updated text - focusable for screen readers
               contentEl.createEl("div", {
                 cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
-                text: previewText(outputText)
+                text: previewText(outputText),
+                attr: {
+                  "tabindex": isSelected ? "0" : "-1",
+                  "id": `${anchorId}-updated`,
+                  "role": "textbox",
+                  "aria-label": "Updated text",
+                  "aria-readonly": "true"
+                }
               });
             } else if (edit.type === "subtraction") {
               contentEl.createEl("div", {
                 cls: "writersroom-sidebar-item-snippet writersroom-sidebar-item-output",
-                text: "(Text will be removed)"
+                text: "(Text will be removed)",
+                attr: {
+                  "tabindex": isSelected ? "0" : "-1",
+                  "id": `${anchorId}-updated`,
+                  "role": "textbox",
+                  "aria-label": "Updated text",
+                  "aria-readonly": "true"
+                }
               });
             }
           }
@@ -7722,11 +7878,19 @@ class WritersRoomSidebarView extends ItemView {
             });
           }
 
-          // Deny button (always available, except for stars which are just informational)
+          // Deny button (always available, except for stars which have their own dismiss button)
           if (edit.type !== "star") {
             actions.push({
               label: "✗ Deny",
               title: "Reject and remove this edit",
+              onClick: () =>
+                this.plugin.resolveSidebarEdit(sourcePath, anchorId)
+            });
+          } else {
+            // Dismiss button for stars (informational edits that can be dismissed)
+            actions.push({
+              label: "✗ Dismiss",
+              title: "Dismiss this star",
               onClick: () =>
                 this.plugin.resolveSidebarEdit(sourcePath, anchorId)
             });
@@ -7743,6 +7907,79 @@ class WritersRoomSidebarView extends ItemView {
 
         this.renderActions(contentEl, actions);
       }
+
+      // Keyboard navigation handler
+      const handleKeyDown = (event: KeyboardEvent) => {
+        if (!this.state.sourcePath || isCollapsed) {
+          return;
+        }
+
+        const currentSectionId = document.activeElement?.id;
+        const outputText = typeof edit.output === "string" ? edit.output : null;
+        
+        // Arrow key navigation within edit sections
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          event.stopPropagation();
+          
+          const sections = [
+            `${anchorId}-type`,
+            `${anchorId}-original`,
+            ...(edit.annotation ? [`${anchorId}-commentary`] : []),
+            ...(outputText || edit.type === "subtraction" ? [`${anchorId}-updated`] : []),
+            ...(!edit.annotation && (edit.type === "annotation" || edit.type === "star") ? [`${anchorId}-commentary`] : [])
+          ].filter(id => {
+            const el = itemEl.querySelector(`#${id}`);
+            return el && (el as HTMLElement).tabIndex >= 0;
+          });
+          
+          const currentIndex = sections.indexOf(currentSectionId || "");
+          let nextIndex: number;
+          
+          if (event.key === "ArrowDown") {
+            nextIndex = currentIndex < sections.length - 1 ? currentIndex + 1 : 0;
+          } else {
+            nextIndex = currentIndex > 0 ? currentIndex - 1 : sections.length - 1;
+          }
+          
+          const nextSection = itemEl.querySelector<HTMLElement>(`#${sections[nextIndex]}`);
+          if (nextSection) {
+            nextSection.focus();
+          }
+          return;
+        }
+        
+        // Enter/Space to select edit
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          event.stopPropagation();
+          
+          // When selecting an edit, collapse all others
+          if (this.state.selectedAnchorId !== anchorId) {
+            // Collapse all edits except the one being selected
+            edits.forEach((e, i) => {
+              const eAnchorId = this.plugin.getAnchorForEdit(e, i);
+              if (eAnchorId !== anchorId) {
+                this.collapsedEdits.add(eAnchorId);
+              } else {
+                this.collapsedEdits.delete(eAnchorId);
+              }
+            });
+          } else {
+            // If activating the already-selected item, expand all
+            this.collapsedEdits.clear();
+          }
+          
+          // handleSidebarSelection will trigger a re-render via setState
+          void this.plugin.handleSidebarSelection(
+            this.state.sourcePath,
+            anchorId
+          );
+          
+          // Announce selection to screen readers
+          this.announceSelection(edit, index, edits.length);
+        }
+      };
 
       itemEl.addEventListener("click", (event) => {
         event.preventDefault();
@@ -7772,6 +8009,18 @@ class WritersRoomSidebarView extends ItemView {
           this.state.sourcePath,
           anchorId
         );
+        
+        // Announce selection to screen readers
+        this.announceSelection(edit, index, edits.length);
+      });
+
+      // Add keyboard event listener to the item
+      itemEl.addEventListener("keydown", handleKeyDown);
+      
+      // Add keyboard event listeners to focusable sections
+      const focusableSections = itemEl.querySelectorAll<HTMLElement>("[tabindex='0'], [tabindex='-1']");
+      focusableSections.forEach(section => {
+        section.addEventListener("keydown", handleKeyDown);
       });
     });
 
@@ -7795,6 +8044,44 @@ class WritersRoomSidebarView extends ItemView {
     }
   }
 
+  private announceSelection(edit: EditEntry, index: number, total: number): void {
+    if (!this.liveRegion) {
+      return;
+    }
+    
+    const outputText = typeof edit.output === "string" ? edit.output : null;
+    const hasCommentary = edit.annotation || (edit.type === "annotation" || edit.type === "star") && outputText;
+    const hasUpdated = outputText || edit.type === "subtraction";
+    
+    let announcement = `Edit ${index + 1} of ${total}: ${edit.type} on line ${edit.line}. `;
+    announcement += `Reason: ${edit.category}. `;
+    announcement += `Original text: ${edit.original_text}. `;
+    
+    if (hasCommentary) {
+      const commentaryText = edit.annotation || outputText || "";
+      announcement += `Commentary: ${commentaryText}. `;
+    }
+    
+    if (hasUpdated) {
+      if (edit.type === "subtraction") {
+        announcement += "Updated text: Text will be removed. ";
+      } else if (outputText) {
+        announcement += `Updated text: ${outputText}. `;
+      }
+    }
+    
+    announcement += "Use arrow keys to navigate between sections.";
+    
+    // Clear and update live region
+    this.liveRegion.textContent = "";
+    // Use setTimeout to ensure the clear is processed before adding new content
+    setTimeout(() => {
+      if (this.liveRegion) {
+        this.liveRegion.textContent = announcement;
+      }
+    }, 10);
+  }
+
   private renderActions(container: HTMLElement, actions: SidebarAction[]): void {
     if (!actions.length) {
       return;
@@ -7811,10 +8098,10 @@ class WritersRoomSidebarView extends ItemView {
         text: action.label
       });
 
-      // Add specific classes for Accept/Deny buttons
+      // Add specific classes for Accept/Deny/Dismiss buttons
       if (action.label.includes("Accept")) {
         buttonEl.addClass("writersroom-action-accept");
-      } else if (action.label.includes("Deny")) {
+      } else if (action.label.includes("Deny") || action.label.includes("Dismiss")) {
         buttonEl.addClass("writersroom-action-deny");
       }
 
@@ -7847,7 +8134,14 @@ class WritersRoomSidebarView extends ItemView {
       ".writersroom-sidebar-item"
     );
 
-    items.forEach((el) => el.classList.remove("is-selected"));
+    items.forEach((el) => {
+      el.classList.remove("is-selected");
+      el.setAttribute("tabindex", "-1");
+      el.removeAttribute("aria-current");
+      // Make all sections in unselected items non-focusable
+      const sections = el.querySelectorAll<HTMLElement>("[tabindex='0']");
+      sections.forEach(section => section.setAttribute("tabindex", "-1"));
+    });
 
     if (!this.state.selectedAnchorId) {
       return;
@@ -7859,10 +8153,33 @@ class WritersRoomSidebarView extends ItemView {
 
     if (activeItem) {
       activeItem.classList.add("is-selected");
+      activeItem.setAttribute("tabindex", "0");
+      activeItem.setAttribute("aria-current", "true");
+      
+      // Make all sections in selected item focusable
+      const sections = activeItem.querySelectorAll<HTMLElement>("[tabindex='-1'][id]");
+      sections.forEach(section => {
+        if (section.id && section.id.includes(this.state.selectedAnchorId || "")) {
+          section.setAttribute("tabindex", "0");
+        }
+      });
+      
       activeItem.scrollIntoView({ 
         block: "center", 
         behavior: "smooth",
         inline: "nearest"
+      });
+      
+      // Focus the type heading when item is selected (for screen readers)
+      // Use requestAnimationFrame to ensure DOM is updated
+      requestAnimationFrame(() => {
+        const typeHeading = activeItem.querySelector<HTMLElement>(`#${this.state.selectedAnchorId}-type`);
+        if (typeHeading && typeHeading.tabIndex >= 0) {
+          typeHeading.focus();
+        } else {
+          // Fallback to focusing the item itself
+          activeItem.focus();
+        }
       });
     }
   }
